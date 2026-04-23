@@ -1,3 +1,4 @@
+import "server-only";
 import { supabaseServer } from "@/lib/supabase/server";
 import {
   buildCandidates,
@@ -6,6 +7,11 @@ import {
   normalizeCustomerName,
   TransactionRow,
 } from "@/lib/matching/candidate-engine";
+import {
+  requestLlmMatchDecision,
+  validateLlmMatchDecision,
+  ValidatedLlmMatchDecision,
+} from "@/lib/matching/llm-decision";
 
 type MatchRow = {
   id: string;
@@ -38,7 +44,13 @@ type PlannedAllocation = {
   newStatus: "paid" | "partially_paid";
 };
 
+type FixedAllocationAmount = {
+  invoice_id: string;
+  amount: number;
+};
+
 const AUTO_MATCH_THRESHOLD = 0.75;
+const AMBIGUOUS_LLM_MIN_SCORE = 0.45;
 const MULTI_INVOICE_MIN_TOP_SCORE = 0.6;
 const MONEY_EPSILON = 0.01;
 const STRONG_NAME_THRESHOLD = 0.6;
@@ -419,6 +431,39 @@ function buildAllocationPlan(input: {
   };
 }
 
+function buildFixedAllocationPlan(input: {
+  allocations: FixedAllocationAmount[];
+  candidateLookup: Map<string, MatchCandidate>;
+  invoiceLookup: Map<string, InvoiceRow>;
+}): PlannedAllocation[] {
+  return input.allocations
+    .map((allocation) => {
+      const invoice = input.invoiceLookup.get(allocation.invoice_id);
+      const candidate = input.candidateLookup.get(allocation.invoice_id);
+
+      if (!invoice || !candidate) {
+        return null;
+      }
+
+      const currentBalanceDue = roundMoney(Number(invoice.balance_due));
+      const allocationAmount = roundMoney(allocation.amount);
+      const newBalanceDue = normalizeBalanceDue(
+        currentBalanceDue - allocationAmount
+      );
+
+      return {
+        invoice,
+        candidate,
+        amount: allocationAmount,
+        newBalanceDue,
+        newStatus: buildInvoiceStatus(newBalanceDue),
+      };
+    })
+    .filter(
+      (allocation): allocation is PlannedAllocation => allocation !== null
+    );
+}
+
 function buildMatchStatus(allocations: PlannedAllocation[]): MatchRow["status"] {
   if (
     allocations.length === 1 &&
@@ -437,6 +482,228 @@ function buildAllocationReason(allocations: PlannedAllocation[]): string {
 
   const customerName = allocations[0].candidate.customer_name;
   return `Auto-applied across ${allocations.length} invoices for ${customerName} using strong same-customer candidates ordered by score and invoice date.`;
+}
+
+async function persistPlannedMatch(input: {
+  transaction: TransactionRow;
+  candidates: MatchCandidate[];
+  allocations: PlannedAllocation[];
+  confidence: number;
+  reason: string;
+}): Promise<RunMatchResult> {
+  const insertResult = await insertMatchOrGetExisting({
+    transaction_id: input.transaction.id,
+    status: buildMatchStatus(input.allocations),
+    confidence: input.confidence,
+    reason: input.reason,
+  });
+
+  if (insertResult.existing) {
+    return buildExistingResult(input.transaction, insertResult.match, input.candidates);
+  }
+
+  const allocations: AllocationRow[] = [];
+
+  for (const plannedAllocation of input.allocations) {
+    const allocation = await insertAllocation({
+      match_id: insertResult.match.id,
+      invoice_id: plannedAllocation.invoice.id,
+      amount: plannedAllocation.amount,
+    });
+
+    allocations.push(allocation);
+
+    await updateInvoiceBalance({
+      invoiceId: plannedAllocation.invoice.id,
+      newBalanceDue: plannedAllocation.newBalanceDue,
+      newStatus: plannedAllocation.newStatus,
+    });
+  }
+
+  return {
+    transaction: input.transaction,
+    existing: false,
+    match: insertResult.match,
+    allocations,
+    candidates: input.candidates,
+  };
+}
+
+async function applyDeterministicAutoMatch(input: {
+  transaction: TransactionRow;
+  candidates: MatchCandidate[];
+  topCandidate: MatchCandidate;
+  selectedCandidateSet: MatchCandidate[];
+  useMultiInvoiceSelection: boolean;
+}): Promise<RunMatchResult> {
+  const selectedInvoices = input.useMultiInvoiceSelection
+    ? await fetchEligibleInvoicesByIds(
+        [...new Set(input.selectedCandidateSet.map((candidate) => candidate.invoice_id))]
+      )
+    : (
+        await Promise.all([fetchEligibleInvoiceById(input.topCandidate.invoice_id)])
+      ).filter((invoice): invoice is InvoiceRow => invoice !== null);
+
+  if (selectedInvoices.length === 0) {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: input.topCandidate.score,
+      reason: "Candidate invoices are no longer eligible for auto-application.",
+      candidates: input.candidates,
+    });
+  }
+
+  const paymentAmount = roundMoney(Math.abs(Number(input.transaction.amount)));
+  const invoiceLookup = new Map(
+    selectedInvoices.map((invoice) => [invoice.id, invoice])
+  );
+  const allocationCandidates = input.selectedCandidateSet.filter((candidate) =>
+    invoiceLookup.has(candidate.invoice_id)
+  );
+
+  if (allocationCandidates.length === 0) {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: input.topCandidate.score,
+      reason: "Candidate invoices are no longer eligible for auto-application.",
+      candidates: input.candidates,
+    });
+  }
+
+  const allocationPlan = buildAllocationPlan({
+    paymentAmount,
+    candidates: allocationCandidates,
+    invoiceLookup,
+  });
+
+  if (allocationPlan.allocations.length === 0) {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: input.topCandidate.score,
+      reason: "Allocation amount was zero.",
+      candidates: input.candidates,
+    });
+  }
+
+  if (allocationPlan.remainingPayment > MONEY_EPSILON) {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: input.topCandidate.score,
+      reason:
+        "Payment exceeded safely allocable balance across eligible candidate invoices. Overpayments are not auto-applied in v1.",
+      candidates: input.candidates,
+    });
+  }
+
+  return persistPlannedMatch({
+    transaction: input.transaction,
+    candidates: input.candidates,
+    allocations: allocationPlan.allocations,
+    confidence: input.topCandidate.score,
+    reason: buildAllocationReason(allocationPlan.allocations),
+  });
+}
+
+function buildLlmUnmatchedReason(
+  message: string,
+  validatedDecision?: ValidatedLlmMatchDecision
+): string {
+  const explanation = validatedDecision?.explanation
+    ? ` ${validatedDecision.explanation}`
+    : "";
+
+  return `Deterministic matching deferred to the LLM for an ambiguous candidate set. Persisted as unmatched. ${message}${explanation}`.trim();
+}
+
+async function applyLlmAssistedMatch(input: {
+  transaction: TransactionRow;
+  candidates: MatchCandidate[];
+  topCandidate: MatchCandidate;
+}): Promise<RunMatchResult> {
+  const paymentAmount = roundMoney(Math.abs(Number(input.transaction.amount)));
+  const llmResult = await requestLlmMatchDecision({
+    transaction: input.transaction,
+    candidates: input.candidates,
+    paymentAmount,
+  });
+
+  if (!llmResult.success) {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: input.topCandidate.score,
+      reason: buildLlmUnmatchedReason(
+        `LLM decision layer unavailable: ${llmResult.error}`
+      ),
+      candidates: input.candidates,
+    });
+  }
+
+  const selectedInvoices = await fetchEligibleInvoicesByIds(
+    [...new Set(llmResult.decision.selected_invoice_ids)]
+  );
+  const validatedDecision = validateLlmMatchDecision({
+    transaction: input.transaction,
+    decision: llmResult.decision,
+    candidates: input.candidates,
+    invoices: selectedInvoices,
+  });
+
+  if (!validatedDecision.valid) {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: input.topCandidate.score,
+      reason: buildLlmUnmatchedReason(
+        `LLM decision rejected by deterministic validation: ${validatedDecision.reason}`
+      ),
+      candidates: input.candidates,
+    });
+  }
+
+  if (validatedDecision.decision.decisionType === "unmatched") {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: validatedDecision.decision.confidence,
+      reason: buildLlmUnmatchedReason(
+        "LLM chose not to match this transaction.",
+        validatedDecision.decision
+      ),
+      candidates: input.candidates,
+    });
+  }
+
+  const invoiceLookup = new Map(
+    selectedInvoices.map((invoice) => [invoice.id, invoice])
+  );
+  const candidateLookup = new Map(
+    input.candidates.map((candidate) => [candidate.invoice_id, candidate])
+  );
+  const plannedAllocations = buildFixedAllocationPlan({
+    allocations: validatedDecision.decision.allocations,
+    candidateLookup,
+    invoiceLookup,
+  });
+
+  if (
+    plannedAllocations.length !== validatedDecision.decision.allocations.length
+  ) {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: input.topCandidate.score,
+      reason: buildLlmUnmatchedReason(
+        "LLM-selected invoices are no longer eligible for persistence.",
+        validatedDecision.decision
+      ),
+      candidates: input.candidates,
+    });
+  }
+
+  return persistPlannedMatch({
+    transaction: input.transaction,
+    candidates: input.candidates,
+    allocations: plannedAllocations,
+    confidence: validatedDecision.decision.confidence,
+    reason: `LLM-assisted decision. ${validatedDecision.decision.explanation}`.trim(),
+  });
 }
 
 export async function runTransactionMatch(
@@ -483,7 +750,19 @@ export async function runTransactionMatch(
     familyCandidates
   );
 
-  if (!hasSafeSingleConfidence && !hasSafeMultiConfidence) {
+  if (hasSafeSingleConfidence || hasSafeMultiConfidence) {
+    return applyDeterministicAutoMatch({
+      transaction,
+      candidates,
+      topCandidate,
+      selectedCandidateSet: hasSafeMultiConfidence
+        ? familyCandidates
+        : [topCandidate],
+      useMultiInvoiceSelection: hasSafeMultiConfidence,
+    });
+  }
+
+  if (topCandidate.score < AMBIGUOUS_LLM_MIN_SCORE) {
     return createUnmatchedResult({
       transaction,
       confidence: topCandidate.score,
@@ -492,102 +771,9 @@ export async function runTransactionMatch(
     });
   }
 
-  const selectedCandidateSet = hasSafeMultiConfidence
-    ? familyCandidates
-    : [topCandidate];
-  const selectedInvoices = hasSafeMultiConfidence
-    ? await fetchEligibleInvoicesByIds(
-        [...new Set(selectedCandidateSet.map((candidate) => candidate.invoice_id))]
-      )
-    : (
-        await Promise.all([fetchEligibleInvoiceById(topCandidate.invoice_id)])
-      ).filter((invoice): invoice is InvoiceRow => invoice !== null);
-
-  if (selectedInvoices.length === 0) {
-    return createUnmatchedResult({
-      transaction,
-      confidence: topCandidate.score,
-      reason: "Candidate invoices are no longer eligible for auto-application.",
-      candidates,
-    });
-  }
-
-  const paymentAmount = roundMoney(Math.abs(Number(transaction.amount)));
-  const invoiceLookup = new Map(
-    selectedInvoices.map((invoice) => [invoice.id, invoice])
-  );
-  const allocationCandidates = selectedCandidateSet.filter((candidate) =>
-    invoiceLookup.has(candidate.invoice_id)
-  );
-
-  if (allocationCandidates.length === 0) {
-    return createUnmatchedResult({
-      transaction,
-      confidence: topCandidate.score,
-      reason: "Candidate invoices are no longer eligible for auto-application.",
-      candidates,
-    });
-  }
-
-  const allocationPlan = buildAllocationPlan({
-    paymentAmount,
-    candidates: allocationCandidates,
-    invoiceLookup,
-  });
-
-  if (allocationPlan.allocations.length === 0) {
-    return createUnmatchedResult({
-      transaction,
-      confidence: topCandidate.score,
-      reason: "Allocation amount was zero.",
-      candidates,
-    });
-  }
-
-  if (allocationPlan.remainingPayment > MONEY_EPSILON) {
-    return createUnmatchedResult({
-      transaction,
-      confidence: topCandidate.score,
-      reason:
-        "Payment exceeded safely allocable balance across eligible candidate invoices. Overpayments are not auto-applied in v1.",
-      candidates,
-    });
-  }
-
-  const insertResult = await insertMatchOrGetExisting({
-    transaction_id: transaction.id,
-    status: buildMatchStatus(allocationPlan.allocations),
-    confidence: topCandidate.score,
-    reason: buildAllocationReason(allocationPlan.allocations),
-  });
-
-  if (insertResult.existing) {
-    return buildExistingResult(transaction, insertResult.match, candidates);
-  }
-
-  const allocations: AllocationRow[] = [];
-
-  for (const plannedAllocation of allocationPlan.allocations) {
-    const allocation = await insertAllocation({
-      match_id: insertResult.match.id,
-      invoice_id: plannedAllocation.invoice.id,
-      amount: plannedAllocation.amount,
-    });
-
-    allocations.push(allocation);
-
-    await updateInvoiceBalance({
-      invoiceId: plannedAllocation.invoice.id,
-      newBalanceDue: plannedAllocation.newBalanceDue,
-      newStatus: plannedAllocation.newStatus,
-    });
-  }
-
-  return {
+  return applyLlmAssistedMatch({
     transaction,
-    existing: false,
-    match: insertResult.match,
-    allocations,
     candidates,
-  };
+    topCandidate,
+  });
 }

@@ -30,43 +30,172 @@ export type MatchCandidate = {
   reason: string;
 };
 
+const LEGAL_ENTITY_TOKENS = new Set([
+  "co",
+  "company",
+  "corp",
+  "corporation",
+  "inc",
+  "llc",
+  "limited",
+  "ltd",
+]);
+
+const DESCRIPTOR_TOKENS = new Set(["service", "services"]);
+const TRANSACTION_NOISE_TOKENS = new Set([
+  "ach",
+  "credit",
+  "debit",
+  "payment",
+  "transfer",
+]);
+
 export function normalizeCustomerName(value: string): string {
   return value
     .toLowerCase()
     .replace(/[^\w\s]/g, " ")
-    .replace(
-      /\b(inc|llc|corp|corporation|company|co|ltd|limited|services|service)\b/g,
-      " "
-    )
+    .replace(/\b(inc|llc|corp|corporation|company|co|ltd|limited)\b/g, " ")
+    .replace(/\b(services|service)\b/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function tokenize(value: string): string[] {
-  return normalizeCustomerName(value)
+function normalizeForScoring(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeForScoring(value: string): string[] {
+  return normalizeForScoring(value)
     .split(" ")
     .map((token) => token.trim())
     .filter(Boolean);
 }
 
-function computeNameScore(transactionName: string, customerName: string): number {
-  const txTokens = new Set(tokenize(transactionName));
-  const invoiceTokens = new Set(tokenize(customerName));
+function dedupeTokens(tokens: string[]): string[] {
+  return [...new Set(tokens)];
+}
 
-  if (txTokens.size === 0 || invoiceTokens.size === 0) {
-    return 0;
+function isIdentifierToken(token: string): boolean {
+  return /\d/.test(token);
+}
+
+function isLowSignalToken(token: string): boolean {
+  return (
+    LEGAL_ENTITY_TOKENS.has(token) ||
+    DESCRIPTOR_TOKENS.has(token) ||
+    TRANSACTION_NOISE_TOKENS.has(token)
+  );
+}
+
+function getTokenWeight(token: string): number {
+  if (isIdentifierToken(token)) {
+    return 1.75;
   }
 
-  let overlap = 0;
-
-  for (const token of txTokens) {
-    if (invoiceTokens.has(token)) {
-      overlap += 1;
-    }
+  if (TRANSACTION_NOISE_TOKENS.has(token)) {
+    return 0.5;
   }
 
-  const maxSize = Math.max(txTokens.size, invoiceTokens.size);
-  return overlap / maxSize;
+  if (LEGAL_ENTITY_TOKENS.has(token) || DESCRIPTOR_TOKENS.has(token)) {
+    return 0.5;
+  }
+
+  return 1;
+}
+
+function sumTokenWeights(tokens: string[]): number {
+  return tokens.reduce((total, token) => total + getTokenWeight(token), 0);
+}
+
+function formatTokenList(tokens: string[]): string {
+  return tokens.join(", ");
+}
+
+function buildNameSignalSummary(input: {
+  sharedTokens: string[];
+  sharedIdentifiers: string[];
+  sharedCoreTokens: string[];
+}): string {
+  if (input.sharedIdentifiers.length > 0) {
+    const specificTokenDetail =
+      input.sharedCoreTokens.length > 0
+        ? ` Shared specific token(s): ${formatTokenList(input.sharedCoreTokens)}.`
+        : "";
+
+    return `Shared identifier token(s): ${formatTokenList(input.sharedIdentifiers)}.${specificTokenDetail}`;
+  }
+
+  if (input.sharedCoreTokens.length >= 2) {
+    return `Shared specific token(s): ${formatTokenList(input.sharedCoreTokens)}.`;
+  }
+
+  if (input.sharedCoreTokens.length === 1) {
+    return `Only one shared specific token: ${input.sharedCoreTokens[0]}.`;
+  }
+
+  if (input.sharedTokens.length > 0) {
+    return `Only low-signal overlap: ${formatTokenList(input.sharedTokens)}.`;
+  }
+
+  return "No meaningful customer-name overlap.";
+}
+
+function computeNameScore(
+  transactionName: string,
+  customerName: string
+): { score: number; signalSummary: string } {
+  const txTokens = dedupeTokens(tokenizeForScoring(transactionName));
+  const invoiceTokens = dedupeTokens(tokenizeForScoring(customerName));
+
+  if (txTokens.length === 0 || invoiceTokens.length === 0) {
+    return {
+      score: 0,
+      signalSummary: "No meaningful customer-name overlap.",
+    };
+  }
+
+  const invoiceTokenSet = new Set(invoiceTokens);
+  const sharedTokens = txTokens.filter((token) => invoiceTokenSet.has(token));
+  const sharedIdentifiers = sharedTokens.filter((token) =>
+    isIdentifierToken(token)
+  );
+  const sharedCoreTokens = sharedTokens.filter(
+    (token) => !isIdentifierToken(token) && !isLowSignalToken(token)
+  );
+
+  if (sharedTokens.length === 0) {
+    return {
+      score: 0,
+      signalSummary: "No meaningful customer-name overlap.",
+    };
+  }
+
+  const overlapWeight = sumTokenWeights(sharedTokens);
+  const txWeight = sumTokenWeights(txTokens);
+  const invoiceWeight = sumTokenWeights(invoiceTokens);
+
+  let score = overlapWeight / Math.max(txWeight, invoiceWeight);
+
+  if (
+    sharedIdentifiers.length === 0 &&
+    sharedCoreTokens.length <= 1 &&
+    sharedTokens.length === 1
+  ) {
+    score = Math.min(score, 0.55);
+  }
+
+  return {
+    score: Number(Math.min(score, 1).toFixed(4)),
+    signalSummary: buildNameSignalSummary({
+      sharedTokens,
+      sharedIdentifiers,
+      sharedCoreTokens,
+    }),
+  };
 }
 
 function computeAmountScore(paymentAmount: number, balanceDue: number): {
@@ -138,7 +267,8 @@ function buildReason(
   nameScore: number,
   amountReason: string,
   transactionName: string,
-  customerName: string
+  customerName: string,
+  signalSummary: string
 ): string {
   const nameReason =
     nameScore >= 0.9
@@ -149,7 +279,7 @@ function buildReason(
       ? "Partial customer name similarity"
       : "Weak customer name similarity";
 
-  return `${nameReason}. ${amountReason}. Transaction "${transactionName}" compared to invoice customer "${customerName}".`;
+  return `${nameReason}. ${signalSummary} ${amountReason}. Transaction "${transactionName}" compared to invoice customer "${customerName}".`;
 }
 
 export function buildCandidates(
@@ -162,7 +292,7 @@ export function buildCandidates(
 
   return invoices
     .map((invoice) => {
-      const nameScore = computeNameScore(
+      const { score: nameScore, signalSummary } = computeNameScore(
         transaction.name,
         invoice.customer_name
       );
@@ -189,7 +319,8 @@ export function buildCandidates(
           nameScore,
           amountReason,
           transaction.name,
-          invoice.customer_name
+          invoice.customer_name,
+          signalSummary
         ),
       };
     })
