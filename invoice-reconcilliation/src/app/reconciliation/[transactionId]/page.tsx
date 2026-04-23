@@ -64,18 +64,18 @@ function getOutcomeCallout(match: MatchRow | null): {
   if (!match) {
     return {
       toneClass: "border-blue-200 bg-blue-50 text-blue-900",
-      title: "No persisted outcome yet",
+      title: "This transaction has not been processed yet.",
       description:
-        "Automatic processing is the primary path for new transactions. This manual run remains available for older records, debugging, and demos.",
+        "Run the matcher to generate the reconciliation outcome and any review context for this transaction.",
     };
   }
 
   if (match.status === "human_review_needed") {
     return {
       toneClass: "border-orange-200 bg-orange-50 text-orange-900",
-      title: "Review needed before any invoice can be updated",
+      title: "Review needed before applying this payment.",
       description:
-        "Plausible invoice candidates were found, and the system intentionally avoided an unsafe automatic application. An agent can review the ranked candidates below and manually apply the payment to one eligible invoice.",
+        "Multiple plausible invoice candidates were found. Human review is required before applying this payment.",
     };
   }
 
@@ -111,23 +111,23 @@ function getOutcomeCallout(match: MatchRow | null): {
 
   return {
     toneClass: "border-slate-200 bg-slate-50 text-slate-900",
-    title: "No invoice applied",
-    description: match.reason.includes("Outgoing transactions")
-      ? "This transaction was stored for completeness, but outgoing activity is not eligible for invoice matching."
-      : "No meaningful invoice application was made for this transaction.",
+    title: "This payment has not been applied to any invoice.",
+    description: match.reason.includes("not eligible for invoice matching")
+      ? "Stored for completeness, but not eligible for invoice matching."
+      : "No safe invoice application was created for this transaction.",
   };
 }
 
 function getAllocationEmptyState(match: MatchRow): string {
   if (match.status === "human_review_needed") {
-    return "No invoice allocation was applied because this payment was intentionally escalated for human review.";
+    return "No invoice allocation has been created because human review is still required.";
   }
 
   if (match.status === "unmatched") {
-    return "This payment was not applied to any invoice.";
+    return "This payment has not been applied to any invoice.";
   }
 
-  return "No invoice allocation was applied for this persisted result.";
+  return "No invoice allocation is stored for this result.";
 }
 
 async function fetchTransaction(
@@ -250,8 +250,7 @@ export default async function TransactionDetailPage(
   let candidateMessage: string | undefined;
 
   if (transaction.direction !== "incoming") {
-    candidateMessage =
-      "Outgoing transactions are not eligible for invoice matching.";
+    candidateMessage = "Stored for completeness, but not eligible for invoice matching.";
   } else {
     candidates = buildCandidates(transaction, await fetchEligibleInvoices());
   }
@@ -428,8 +427,7 @@ export default async function TransactionDetailPage(
             </div>
           ) : (
             <div className="rounded-2xl border border-blue-200 bg-blue-50 p-5 text-sm leading-7 text-blue-900">
-              No persisted match exists yet. Run the matcher to capture a
-              deterministic outcome and, when needed, candidate review context.
+              This transaction has not been processed yet.
             </div>
           )}
         </section>
@@ -447,11 +445,8 @@ export default async function TransactionDetailPage(
 
           {persistedMatch?.status === "human_review_needed" ? (
             <div className="mb-4 rounded-2xl border border-orange-200 bg-orange-50 p-4 text-sm leading-6 text-orange-900">
-              Plausible invoice candidates were found for this transaction. The
-              system intentionally skipped automatic application because the
-              candidate set was ambiguous, so the ranked invoices remain visible
-              for agent review. Choose one eligible invoice below to apply the
-              payment manually.
+              Multiple plausible invoice candidates were found. Human review is
+              required before applying this payment.
             </div>
           ) : null}
 
@@ -480,8 +475,8 @@ export default async function TransactionDetailPage(
                     key={candidate.invoice_id}
                     className={`rounded-2xl border p-5 ${
                       index === 0
-                        ? "border-blue-200 bg-blue-50/40"
-                        : "border-slate-200 bg-white"
+                        ? "border-blue-200 bg-blue-50/50"
+                        : "border-slate-200 bg-slate-50"
                     }`}
                   >
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -570,14 +565,16 @@ export default async function TransactionDetailPage(
                   </div>
 
                   {canApplyThisCandidate ? (
-                    <div className="mt-4 rounded-2xl border border-sky-200 bg-sky-50 p-4">
+                    <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
                         <div>
-                          <div className="text-sm font-medium text-sky-900">
+                          <div className="text-sm font-medium text-blue-900">
                             Manual review action
                           </div>
-                          <p className="mt-1 text-sm text-sky-900/80">
-                            Apply this incoming payment to {candidate.invoice_number} using the existing allocation rules.
+                          <p className="mt-1 text-sm text-blue-900/80">
+                            Apply this incoming payment to{" "}
+                            {candidate.invoice_number} using the existing
+                            allocation rules.
                           </p>
                         </div>
                         <ManualApplyButton
@@ -607,8 +604,8 @@ export default async function TransactionDetailPage(
 
           {!persistedMatch ? (
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
-              No persisted allocation exists because this transaction has not
-              been matched yet.
+              No allocation is stored because this transaction has not been
+              processed yet.
             </div>
           ) : allocations.length === 0 ? (
             <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">

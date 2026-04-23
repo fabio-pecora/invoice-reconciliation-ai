@@ -100,6 +100,14 @@ function buildIncomingSections(items: TransactionListItem[]): OutcomeSection[] {
   ];
 }
 
+function getSectionContainerClass(sectionId: string): string {
+  if (sectionId === "review-needed") {
+    return "overflow-hidden rounded-2xl border border-orange-200 bg-orange-50/50 shadow-sm";
+  }
+
+  return "overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm";
+}
+
 function renderTransactionRow(
   item: TransactionListItem,
   showOriginBadge: boolean
@@ -111,8 +119,8 @@ function renderTransactionRow(
     <Link
       key={transaction.id}
       href={`/reconciliation/${transaction.id}`}
-      className={`block transition hover:bg-slate-50 ${
-        match?.status === "human_review_needed" ? "bg-orange-50/40" : ""
+      className={`block hover:bg-slate-50 ${
+        match?.status === "human_review_needed" ? "bg-orange-50/70" : ""
       }`}
     >
       <div className="flex flex-col gap-4 px-5 py-4 xl:flex-row xl:items-center xl:justify-between">
@@ -154,7 +162,7 @@ function renderTransactionRow(
             ) : null}
           </div>
 
-          <p className="truncate text-sm text-slate-700">
+          <p className="truncate text-sm text-slate-600">
             {getShortMatchExplanation(match)}
           </p>
         </div>
@@ -170,10 +178,10 @@ function renderTransactionRow(
             {formatMoney(Number(transaction.amount))}
           </div>
           <span
-            className={`rounded-lg px-3 py-2 text-sm font-medium ${
+            className={`inline-flex items-center rounded-lg px-3 py-2 text-sm font-medium ${
               match?.status === "human_review_needed"
                 ? "bg-orange-600 text-white"
-                : "border border-slate-300 text-slate-700"
+                : "bg-blue-600 text-white"
             }`}
           >
             {getMatchActionLabel(match)}
@@ -221,8 +229,9 @@ export default function TransactionOutcomeBoard({
               Incoming transactions stay in focus
             </h2>
             <p className="text-sm text-slate-600">
-              Outgoing transactions are stored for completeness, but they are
-              hidden from the main reconciliation flow by default.
+              Stored for completeness, but not eligible for invoice matching.
+              Outgoing activity stays hidden from the main reconciliation flow
+              by default.
             </p>
             <p className="text-sm text-slate-500">
               {showOutgoing
@@ -252,19 +261,25 @@ export default function TransactionOutcomeBoard({
           {incomingSections.map((section) => (
             <section
               key={section.id}
-              className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm"
+              className={getSectionContainerClass(section.id)}
             >
               <div className="border-b border-slate-200 px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <h2 className="text-lg font-medium text-slate-900">
+                    <h2 className="text-lg font-semibold text-slate-900">
                       {section.title}
                     </h2>
                     <p className="mt-1 text-sm text-slate-600">
                       {section.description}
                     </p>
                   </div>
-                  <span className="rounded-full bg-slate-100 px-3 py-1 text-sm font-medium text-slate-700">
+                  <span
+                    className={`rounded-full px-3 py-1 text-sm font-medium ${
+                      section.id === "review-needed"
+                        ? "bg-orange-100 text-orange-900 ring-1 ring-orange-200"
+                        : "bg-slate-100 text-slate-700"
+                    }`}
+                  >
                     {section.items.length}
                   </span>
                 </div>

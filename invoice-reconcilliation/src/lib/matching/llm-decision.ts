@@ -352,7 +352,7 @@ export function validateLlmMatchDecision(input: {
   if (input.transaction.direction !== "incoming") {
     return {
       valid: false,
-      reason: "Outgoing transactions cannot be matched as incoming payments.",
+      reason: "Stored for completeness, but not eligible for invoice matching.",
     };
   }
 

@@ -79,11 +79,11 @@ export function getOriginBadgeClass(origin: MatchOrigin | null): string {
 
 export function getMatchActionLabel(match: MatchRow | null): string {
   if (!match) {
-    return "Review";
+    return "View Details";
   }
 
   if (match.status === "human_review_needed") {
-    return "Review";
+    return "Review Needed";
   }
 
   return "View Details";
@@ -91,7 +91,7 @@ export function getMatchActionLabel(match: MatchRow | null): string {
 
 export function getShortMatchExplanation(match: MatchRow | null): string {
   if (!match) {
-    return "No persisted reconciliation decision yet.";
+    return "This transaction has not been processed yet.";
   }
 
   return match.reason;

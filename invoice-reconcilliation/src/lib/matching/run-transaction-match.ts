@@ -795,7 +795,7 @@ function buildManualAllocationReason(allocation: PlannedAllocation): string {
 }
 
 function buildOutgoingIneligibleReason(): string {
-  return "Outgoing transactions are not eligible for invoice matching.";
+  return "Stored for completeness, but not eligible for invoice matching.";
 }
 
 function buildNoPlausibleCandidatesReason(): string {

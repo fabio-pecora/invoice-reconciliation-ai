@@ -32,7 +32,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       success: true,
-      message: "Manual invoice application saved.",
+      message: "Payment applied successfully.",
       transaction: result.transaction,
       match: result.match,
       allocations: result.allocations,

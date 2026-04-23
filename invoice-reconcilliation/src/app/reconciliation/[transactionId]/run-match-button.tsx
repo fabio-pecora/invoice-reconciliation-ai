@@ -18,6 +18,10 @@ export default function RunMatchButton({
   const isPending = isSubmitting || isRefreshing;
 
   async function handleClick() {
+    if (isPending) {
+      return;
+    }
+
     setError(null);
     setIsSubmitting(true);
 
@@ -52,6 +56,7 @@ export default function RunMatchButton({
         type="button"
         onClick={handleClick}
         disabled={isPending}
+        aria-busy={isPending}
         className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
       >
         {isPending ? "Running..." : "Run Match"}

@@ -13,7 +13,7 @@ type PlaidSyncPanelProps = {
 
 type SyncFeedback =
   | {
-      tone: "success" | "error";
+      tone: "info" | "success" | "error";
       message: string;
     }
   | {
@@ -129,8 +129,39 @@ export default function PlaidSyncPanel({
   const lastSyncedAt = syncRun?.completed_at ?? syncRun?.started_at ?? null;
 
   async function handleSyncClick() {
+    if (isPending) {
+      return;
+    }
+
     setFeedback({ tone: null, message: null });
     setIsSubmitting(true);
+    setSyncRun((currentRun) =>
+      currentRun
+        ? {
+            ...currentRun,
+            status: "running",
+            started_at: new Date().toISOString(),
+          }
+        : {
+            id: "pending-sync",
+            source: "plaid_sandbox",
+            started_at: new Date().toISOString(),
+            completed_at: null,
+            status: "running",
+            fetched_count: 0,
+            new_count: 0,
+            processed_count: 0,
+            matched_count: 0,
+            review_needed_count: 0,
+            unmatched_count: 0,
+            error_message: null,
+            created_at: new Date().toISOString(),
+          }
+    );
+    setFeedback({
+      tone: "info",
+      message: "Syncing transactions...",
+    });
 
     try {
       const response = await fetch("/api/plaid/sandbox-transactions", {
@@ -153,7 +184,8 @@ export default function PlaidSyncPanel({
       setFeedback({
         tone: "success",
         message:
-          buildSummaryText(nextSummary) ?? "Transactions were synced successfully.",
+          buildSummaryText(nextSummary) ??
+          "Transactions synced successfully.",
       });
 
       startRefresh(() => {
@@ -206,9 +238,12 @@ export default function PlaidSyncPanel({
           type="button"
           onClick={handleSyncClick}
           disabled={isPending}
-          className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-4 py-3 text-sm font-medium text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
+          aria-busy={isPending}
+          className="inline-flex items-center justify-center rounded-xl bg-blue-600 px-4 py-3 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {isPending ? "Syncing Transactions..." : "Sync Transactions from Plaid Sandbox"}
+          {isPending
+            ? "Syncing transactions..."
+            : "Sync Transactions from Plaid Sandbox"}
         </button>
       </div>
 
@@ -217,6 +252,8 @@ export default function PlaidSyncPanel({
           className={`mt-4 rounded-xl border px-4 py-3 text-sm ${
             feedback.tone === "success"
               ? "border-emerald-200 bg-emerald-50 text-emerald-900"
+              : feedback.tone === "info"
+                ? "border-blue-200 bg-blue-50 text-blue-900"
               : "border-red-200 bg-red-50 text-red-900"
           }`}
         >
