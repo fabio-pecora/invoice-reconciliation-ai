@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { MatchStatus } from "@/lib/matching/match-status";
 import { supabaseServer } from "@/lib/supabase/server";
 import { runTransactionMatch } from "@/lib/matching/run-transaction-match";
 
@@ -12,7 +13,7 @@ type RunAllResultItem =
       success: true;
       existing: boolean;
       matchId: string;
-      matchStatus: "matched" | "partially_matched" | "unmatched";
+      matchStatus: MatchStatus;
       allocationCount: number;
     }
   | {
@@ -44,6 +45,7 @@ export async function POST() {
     let created = 0;
     let matched = 0;
     let partiallyMatched = 0;
+    let humanReviewNeeded = 0;
     let unmatched = 0;
 
     for (const transaction of transactions) {
@@ -62,6 +64,8 @@ export async function POST() {
           matched += 1;
         } else if (result.match.status === "partially_matched") {
           partiallyMatched += 1;
+        } else if (result.match.status === "human_review_needed") {
+          humanReviewNeeded += 1;
         } else {
           unmatched += 1;
         }
@@ -95,6 +99,7 @@ export async function POST() {
       created,
       matched,
       partially_matched: partiallyMatched,
+      human_review_needed: humanReviewNeeded,
       unmatched,
       results,
     });

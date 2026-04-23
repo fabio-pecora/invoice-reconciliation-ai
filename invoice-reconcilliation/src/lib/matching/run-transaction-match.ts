@@ -12,14 +12,7 @@ import {
   validateLlmMatchDecision,
   ValidatedLlmMatchDecision,
 } from "@/lib/matching/llm-decision";
-
-type MatchRow = {
-  id: string;
-  transaction_id: string;
-  status: "matched" | "partially_matched" | "unmatched";
-  confidence: number;
-  reason: string;
-};
+import { MatchRow, MatchStatus } from "@/lib/matching/match-status";
 
 type AllocationRow = {
   id: string;
@@ -50,13 +43,59 @@ type FixedAllocationAmount = {
 };
 
 const AUTO_MATCH_THRESHOLD = 0.75;
-const AMBIGUOUS_LLM_MIN_SCORE = 0.45;
+const PLAUSIBLE_CANDIDATE_MIN_SCORE = 0.45;
 const MULTI_INVOICE_MIN_TOP_SCORE = 0.6;
 const MONEY_EPSILON = 0.01;
 const STRONG_NAME_THRESHOLD = 0.6;
+const STRONG_AMOUNT_THRESHOLD = 0.85;
+const EXACT_AMOUNT_THRESHOLD = 0.99;
+const CLOSE_COMPETITOR_GAP = 0.1;
+
+type CandidateSetAssessment = {
+  topCandidate: MatchCandidate | null;
+  plausibleCandidates: MatchCandidate[];
+  familyCandidates: MatchCandidate[];
+  hasPlausibleCandidates: boolean;
+  hasMultiplePlausibleCandidates: boolean;
+  isTrueNoFit: boolean;
+  strongAmountFitCount: number;
+  exactAmountTieCount: number;
+  hasUniqueDistinguishingIdentifier: boolean;
+  hasClosePlausibleCompetitor: boolean;
+  hasSameCustomerFamilyAmbiguity: boolean;
+  isAmbiguousPlausibleSet: boolean;
+  shouldEscalateToHumanReview: boolean;
+  hasSafeSingleConfidence: boolean;
+  hasSafeMultiConfidence: boolean;
+};
 
 function roundMoney(value: number): number {
   return Number(value.toFixed(2));
+}
+
+function tokenizeSignalText(value: string): string[] {
+  return value
+    .toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+function getIdentifierTokens(value: string): string[] {
+  return tokenizeSignalText(value).filter((token) => /\d/.test(token));
+}
+
+function isCandidatePlausible(candidate: MatchCandidate): boolean {
+  return candidate.score >= PLAUSIBLE_CANDIDATE_MIN_SCORE;
+}
+
+function hasPlausibleCandidates(candidates: MatchCandidate[]): boolean {
+  return candidates.some(isCandidatePlausible);
+}
+
+function isTrueNoFit(candidates: MatchCandidate[]): boolean {
+  return !hasPlausibleCandidates(candidates);
 }
 
 function buildInvoiceStatus(newBalanceDue: number): "paid" | "partially_paid" {
@@ -66,6 +105,25 @@ function buildInvoiceStatus(newBalanceDue: number): "paid" | "partially_paid" {
 function normalizeBalanceDue(value: number): number {
   const rounded = roundMoney(value);
   return rounded <= MONEY_EPSILON ? 0 : rounded;
+}
+
+function hasUniqueDistinguishingIdentifier(input: {
+  transaction: TransactionRow;
+  candidates: MatchCandidate[];
+}): boolean {
+  const transactionIdentifiers = new Set(getIdentifierTokens(input.transaction.name));
+
+  if (transactionIdentifiers.size === 0) {
+    return false;
+  }
+
+  const candidatesWithSharedIdentifiers = input.candidates.filter((candidate) => {
+    const candidateIdentifiers = getIdentifierTokens(candidate.customer_name);
+
+    return candidateIdentifiers.some((token) => transactionIdentifiers.has(token));
+  });
+
+  return candidatesWithSharedIdentifiers.length === 1;
 }
 
 function isUniqueTransactionMatchError(error: {
@@ -181,7 +239,7 @@ async function fetchEligibleInvoicesByIds(
 
 async function insertMatch(input: {
   transaction_id: string;
-  status: "matched" | "partially_matched" | "unmatched";
+  status: MatchStatus;
   confidence: number;
   reason: string;
 }): Promise<MatchRow> {
@@ -206,7 +264,7 @@ async function insertMatch(input: {
 
 async function insertMatchOrGetExisting(input: {
   transaction_id: string;
-  status: "matched" | "partially_matched" | "unmatched";
+  status: MatchStatus;
   confidence: number;
   reason: string;
 }): Promise<{ existing: boolean; match: MatchRow }> {
@@ -293,15 +351,16 @@ async function buildExistingResult(
   };
 }
 
-async function createUnmatchedResult(input: {
+async function createPersistedNonAllocationResult(input: {
   transaction: TransactionRow;
+  status: Extract<MatchStatus, "unmatched" | "human_review_needed">;
   confidence: number;
   reason: string;
   candidates: MatchCandidate[];
 }): Promise<RunMatchResult> {
   const insertResult = await insertMatchOrGetExisting({
     transaction_id: input.transaction.id,
-    status: "unmatched",
+    status: input.status,
     confidence: input.confidence,
     reason: input.reason,
   });
@@ -321,6 +380,30 @@ async function createUnmatchedResult(input: {
     allocations: [],
     candidates: input.candidates,
   };
+}
+
+async function createUnmatchedResult(input: {
+  transaction: TransactionRow;
+  confidence: number;
+  reason: string;
+  candidates: MatchCandidate[];
+}): Promise<RunMatchResult> {
+  return createPersistedNonAllocationResult({
+    ...input,
+    status: "unmatched",
+  });
+}
+
+async function createHumanReviewNeededResult(input: {
+  transaction: TransactionRow;
+  confidence: number;
+  reason: string;
+  candidates: MatchCandidate[];
+}): Promise<RunMatchResult> {
+  return createPersistedNonAllocationResult({
+    ...input,
+    status: "human_review_needed",
+  });
 }
 
 function buildCandidateFamily(
@@ -346,6 +429,177 @@ function hasSafeMultiInvoiceConfidence(
     topCandidate.score >= MULTI_INVOICE_MIN_TOP_SCORE &&
     topCandidate.name_score >= STRONG_NAME_THRESHOLD
   );
+}
+
+function hasCloseCompetingCandidate(input: {
+  candidates: MatchCandidate[];
+  topCandidate: MatchCandidate;
+  selectedCandidateSet: MatchCandidate[];
+}): boolean {
+  const selectedInvoiceIds = new Set(
+    input.selectedCandidateSet.map((candidate) => candidate.invoice_id)
+  );
+
+  return input.candidates.some((candidate) => {
+    if (selectedInvoiceIds.has(candidate.invoice_id)) {
+      return false;
+    }
+
+    if (candidate.score < PLAUSIBLE_CANDIDATE_MIN_SCORE) {
+      return false;
+    }
+
+    return input.topCandidate.score - candidate.score <= CLOSE_COMPETITOR_GAP;
+  });
+}
+
+function isAmbiguousPlausibleSet(input: {
+  transaction: TransactionRow;
+  topCandidate: MatchCandidate;
+  plausibleCandidates: MatchCandidate[];
+  familyCandidates: MatchCandidate[];
+}): boolean {
+  if (input.plausibleCandidates.length < 2) {
+    return false;
+  }
+
+  const secondCandidate = input.plausibleCandidates[1];
+  const exactAmountTieCount = input.plausibleCandidates.filter(
+    (candidate) => candidate.amount_score >= EXACT_AMOUNT_THRESHOLD
+  ).length;
+  const strongAmountFitCount = input.plausibleCandidates.filter(
+    (candidate) => candidate.amount_score >= STRONG_AMOUNT_THRESHOLD
+  ).length;
+  const noStrongDistinguishingSignal = !hasUniqueDistinguishingIdentifier({
+    transaction: input.transaction,
+    candidates: input.plausibleCandidates,
+  });
+  const hasCloseTopCompetition =
+    secondCandidate !== undefined &&
+    input.topCandidate.score - secondCandidate.score <= CLOSE_COMPETITOR_GAP;
+  const hasSameCustomerFamilyAmbiguity =
+    input.familyCandidates.length >= 2 &&
+    (exactAmountTieCount >= 2 || strongAmountFitCount >= 2);
+
+  return (
+    noStrongDistinguishingSignal &&
+    (hasCloseTopCompetition ||
+      exactAmountTieCount >= 2 ||
+      hasSameCustomerFamilyAmbiguity ||
+      strongAmountFitCount >= 3)
+  );
+}
+
+function shouldEscalateToHumanReview(
+  assessment: CandidateSetAssessment
+): boolean {
+  if (!assessment.hasPlausibleCandidates) {
+    return false;
+  }
+
+  if (assessment.isAmbiguousPlausibleSet) {
+    return true;
+  }
+
+  return (
+    assessment.hasMultiplePlausibleCandidates &&
+    (!assessment.hasUniqueDistinguishingIdentifier ||
+      assessment.hasClosePlausibleCompetitor ||
+      assessment.exactAmountTieCount >= 2)
+  );
+}
+
+function assessCandidateSet(input: {
+  transaction: TransactionRow;
+  candidates: MatchCandidate[];
+}): CandidateSetAssessment {
+  const topCandidate = input.candidates[0] ?? null;
+  const plausibleCandidates = input.candidates.filter(isCandidatePlausible);
+  const familyCandidates =
+    topCandidate !== null
+      ? buildCandidateFamily(plausibleCandidates, topCandidate)
+      : [];
+  const strongAmountFitCount = plausibleCandidates.filter(
+    (candidate) => candidate.amount_score >= STRONG_AMOUNT_THRESHOLD
+  ).length;
+  const exactAmountTieCount = plausibleCandidates.filter(
+    (candidate) => candidate.amount_score >= EXACT_AMOUNT_THRESHOLD
+  ).length;
+  const hasUniqueIdentifier = hasUniqueDistinguishingIdentifier({
+    transaction: input.transaction,
+    candidates: plausibleCandidates,
+  });
+  const hasClosePlausibleCompetitor =
+    topCandidate !== null &&
+    plausibleCandidates.length > 1 &&
+    hasCloseCompetingCandidate({
+      candidates: plausibleCandidates,
+      topCandidate,
+      selectedCandidateSet: [topCandidate],
+    });
+  const ambiguousPlausibleSet =
+    topCandidate !== null &&
+    isAmbiguousPlausibleSet({
+      transaction: input.transaction,
+      topCandidate,
+      plausibleCandidates,
+      familyCandidates,
+    });
+  const hasSameCustomerFamilyAmbiguity =
+    familyCandidates.length >= 2 &&
+    !hasUniqueIdentifier &&
+    (exactAmountTieCount >= 2 || strongAmountFitCount >= 2);
+  const reviewEscalation = ambiguousPlausibleSet;
+  const hasSafeSingleConfidence =
+    topCandidate !== null &&
+    topCandidate.score >= AUTO_MATCH_THRESHOLD &&
+    !reviewEscalation &&
+    !hasClosePlausibleCompetitor;
+  const hasSafeMultiConfidence =
+    topCandidate !== null &&
+    hasSafeMultiInvoiceConfidence(topCandidate, familyCandidates)
+      ? !hasCloseCompetingCandidate({
+          candidates: plausibleCandidates,
+          topCandidate,
+          selectedCandidateSet: familyCandidates,
+        }) && !reviewEscalation
+      : false;
+  const shouldEscalate =
+    shouldEscalateToHumanReview({
+      topCandidate,
+      plausibleCandidates,
+      familyCandidates,
+      hasPlausibleCandidates: plausibleCandidates.length > 0,
+      hasMultiplePlausibleCandidates: plausibleCandidates.length >= 2,
+      isTrueNoFit: isTrueNoFit(input.candidates),
+      strongAmountFitCount,
+      exactAmountTieCount,
+      hasUniqueDistinguishingIdentifier: hasUniqueIdentifier,
+      hasClosePlausibleCompetitor: Boolean(hasClosePlausibleCompetitor),
+      hasSameCustomerFamilyAmbiguity,
+      isAmbiguousPlausibleSet: Boolean(ambiguousPlausibleSet),
+      shouldEscalateToHumanReview: false,
+      hasSafeSingleConfidence,
+      hasSafeMultiConfidence,
+    });
+
+  return {
+    topCandidate,
+    plausibleCandidates,
+    familyCandidates,
+    hasPlausibleCandidates: plausibleCandidates.length > 0,
+    hasMultiplePlausibleCandidates: plausibleCandidates.length >= 2,
+    isTrueNoFit: isTrueNoFit(input.candidates),
+    strongAmountFitCount,
+    exactAmountTieCount,
+    hasUniqueDistinguishingIdentifier: hasUniqueIdentifier,
+    hasClosePlausibleCompetitor: Boolean(hasClosePlausibleCompetitor),
+    hasSameCustomerFamilyAmbiguity,
+    isAmbiguousPlausibleSet: Boolean(ambiguousPlausibleSet),
+    shouldEscalateToHumanReview: shouldEscalate,
+    hasSafeSingleConfidence,
+    hasSafeMultiConfidence,
+  };
 }
 
 function compareInvoiceDates(left: InvoiceRow, right: InvoiceRow): number {
@@ -476,12 +730,51 @@ function buildMatchStatus(allocations: PlannedAllocation[]): MatchRow["status"] 
 }
 
 function buildAllocationReason(allocations: PlannedAllocation[]): string {
-  if (allocations.length <= 1) {
-    return allocations[0]?.candidate.reason ?? "Auto-applied to one invoice.";
+  if (allocations.length === 1) {
+    return allocations[0].newBalanceDue <= MONEY_EPSILON
+      ? "Matched automatically based on strong name and amount similarity."
+      : "Applied automatically as a partial payment based on strong name and amount similarity.";
   }
 
-  const customerName = allocations[0].candidate.customer_name;
-  return `Auto-applied across ${allocations.length} invoices for ${customerName} using strong same-customer candidates ordered by score and invoice date.`;
+  return `Applied automatically across ${allocations.length} invoices using strong same-customer and amount signals.`;
+}
+
+function buildOutgoingIneligibleReason(): string {
+  return "Outgoing transactions are not eligible for invoice matching.";
+}
+
+function buildNoPlausibleCandidatesReason(): string {
+  return "No plausible invoice candidates were found for this incoming payment.";
+}
+
+function buildWeakCandidateReason(): string {
+  return "No invoice candidate was strong enough for safe automatic application.";
+}
+
+function buildHumanReviewReason(assessment: CandidateSetAssessment): string {
+  if (assessment.exactAmountTieCount >= 2) {
+    return "Several invoices share the same amount and similar customer names. Human review is required because no distinguishing reference was available.";
+  }
+
+  if (assessment.hasSameCustomerFamilyAmbiguity) {
+    return "Multiple plausible invoice candidates were found for the same customer family. Automatic application was skipped because choosing one invoice would have been arbitrary.";
+  }
+
+  if (assessment.strongAmountFitCount >= 2) {
+    return "Multiple plausible invoice candidates were found. Automatic application was skipped because no distinguishing reference was available.";
+  }
+
+  return "Plausible invoice candidates were found, but the payment could not be matched safely. An agent should review the ranked candidates.";
+}
+
+function buildLlmAppliedReason(
+  decision: ValidatedLlmMatchDecision
+): string {
+  if (decision.decisionType === "multi_invoice") {
+    return "Applied automatically across multiple invoices using a validated LLM-assisted ambiguity decision.";
+  }
+
+  return "Applied automatically using a validated LLM-assisted ambiguity decision.";
 }
 
 async function persistPlannedMatch(input: {
@@ -604,22 +897,22 @@ async function applyDeterministicAutoMatch(input: {
   });
 }
 
-function buildLlmUnmatchedReason(
-  message: string,
-  validatedDecision?: ValidatedLlmMatchDecision
-): string {
-  const explanation = validatedDecision?.explanation
-    ? ` ${validatedDecision.explanation}`
-    : "";
-
-  return `Deterministic matching deferred to the LLM for an ambiguous candidate set. Persisted as unmatched. ${message}${explanation}`.trim();
-}
-
 async function applyLlmAssistedMatch(input: {
   transaction: TransactionRow;
   candidates: MatchCandidate[];
-  topCandidate: MatchCandidate;
+  assessment: CandidateSetAssessment;
 }): Promise<RunMatchResult> {
+  const topCandidate = input.assessment.topCandidate;
+
+  if (!topCandidate) {
+    return createUnmatchedResult({
+      transaction: input.transaction,
+      confidence: 0,
+      reason: buildNoPlausibleCandidatesReason(),
+      candidates: input.candidates,
+    });
+  }
+
   const paymentAmount = roundMoney(Math.abs(Number(input.transaction.amount)));
   const llmResult = await requestLlmMatchDecision({
     transaction: input.transaction,
@@ -628,12 +921,19 @@ async function applyLlmAssistedMatch(input: {
   });
 
   if (!llmResult.success) {
+    if (input.assessment.shouldEscalateToHumanReview) {
+      return createHumanReviewNeededResult({
+        transaction: input.transaction,
+        confidence: topCandidate.score,
+        reason: buildHumanReviewReason(input.assessment),
+        candidates: input.candidates,
+      });
+    }
+
     return createUnmatchedResult({
       transaction: input.transaction,
-      confidence: input.topCandidate.score,
-      reason: buildLlmUnmatchedReason(
-        `LLM decision layer unavailable: ${llmResult.error}`
-      ),
+      confidence: topCandidate.score,
+      reason: buildWeakCandidateReason(),
       candidates: input.candidates,
     });
   }
@@ -649,24 +949,37 @@ async function applyLlmAssistedMatch(input: {
   });
 
   if (!validatedDecision.valid) {
+    if (input.assessment.shouldEscalateToHumanReview) {
+      return createHumanReviewNeededResult({
+        transaction: input.transaction,
+        confidence: topCandidate.score,
+        reason: buildHumanReviewReason(input.assessment),
+        candidates: input.candidates,
+      });
+    }
+
     return createUnmatchedResult({
       transaction: input.transaction,
-      confidence: input.topCandidate.score,
-      reason: buildLlmUnmatchedReason(
-        `LLM decision rejected by deterministic validation: ${validatedDecision.reason}`
-      ),
+      confidence: topCandidate.score,
+      reason: buildWeakCandidateReason(),
       candidates: input.candidates,
     });
   }
 
   if (validatedDecision.decision.decisionType === "unmatched") {
+    if (input.assessment.shouldEscalateToHumanReview) {
+      return createHumanReviewNeededResult({
+        transaction: input.transaction,
+        confidence: validatedDecision.decision.confidence,
+        reason: buildHumanReviewReason(input.assessment),
+        candidates: input.candidates,
+      });
+    }
+
     return createUnmatchedResult({
       transaction: input.transaction,
       confidence: validatedDecision.decision.confidence,
-      reason: buildLlmUnmatchedReason(
-        "LLM chose not to match this transaction.",
-        validatedDecision.decision
-      ),
+      reason: buildWeakCandidateReason(),
       candidates: input.candidates,
     });
   }
@@ -686,13 +999,19 @@ async function applyLlmAssistedMatch(input: {
   if (
     plannedAllocations.length !== validatedDecision.decision.allocations.length
   ) {
+    if (input.assessment.shouldEscalateToHumanReview) {
+      return createHumanReviewNeededResult({
+        transaction: input.transaction,
+        confidence: topCandidate.score,
+        reason: buildHumanReviewReason(input.assessment),
+        candidates: input.candidates,
+      });
+    }
+
     return createUnmatchedResult({
       transaction: input.transaction,
-      confidence: input.topCandidate.score,
-      reason: buildLlmUnmatchedReason(
-        "LLM-selected invoices are no longer eligible for persistence.",
-        validatedDecision.decision
-      ),
+      confidence: topCandidate.score,
+      reason: "Candidate invoices changed before the payment could be applied.",
       candidates: input.candidates,
     });
   }
@@ -702,7 +1021,7 @@ async function applyLlmAssistedMatch(input: {
     candidates: input.candidates,
     allocations: plannedAllocations,
     confidence: validatedDecision.decision.confidence,
-    reason: `LLM-assisted decision. ${validatedDecision.decision.explanation}`.trim(),
+    reason: buildLlmAppliedReason(validatedDecision.decision),
   });
 }
 
@@ -725,55 +1044,52 @@ export async function runTransactionMatch(
     return createUnmatchedResult({
       transaction,
       confidence: 0,
-      reason: "Outgoing transaction. Not eligible for invoice matching.",
+      reason: buildOutgoingIneligibleReason(),
       candidates: [],
     });
   }
 
   const invoices = await fetchEligibleInvoices();
   const candidates = buildCandidates(transaction, invoices);
-  const topCandidate = candidates[0];
+  const assessment = assessCandidateSet({
+    transaction,
+    candidates,
+  });
+  const topCandidate = assessment.topCandidate;
 
-  if (!topCandidate) {
+  if (!topCandidate || assessment.isTrueNoFit) {
     return createUnmatchedResult({
       transaction,
-      confidence: 0,
-      reason: "No candidate met the auto-match confidence threshold.",
+      confidence: topCandidate?.score ?? 0,
+      reason: buildNoPlausibleCandidatesReason(),
       candidates,
     });
   }
 
-  const familyCandidates = buildCandidateFamily(candidates, topCandidate);
-  const hasSafeSingleConfidence = topCandidate.score >= AUTO_MATCH_THRESHOLD;
-  const hasSafeMultiConfidence = hasSafeMultiInvoiceConfidence(
-    topCandidate,
-    familyCandidates
-  );
+  if (assessment.isAmbiguousPlausibleSet) {
+    return createHumanReviewNeededResult({
+      transaction,
+      confidence: topCandidate.score,
+      reason: buildHumanReviewReason(assessment),
+      candidates,
+    });
+  }
 
-  if (hasSafeSingleConfidence || hasSafeMultiConfidence) {
+  if (assessment.hasSafeSingleConfidence || assessment.hasSafeMultiConfidence) {
     return applyDeterministicAutoMatch({
       transaction,
       candidates,
       topCandidate,
-      selectedCandidateSet: hasSafeMultiConfidence
-        ? familyCandidates
+      selectedCandidateSet: assessment.hasSafeMultiConfidence
+        ? assessment.familyCandidates
         : [topCandidate],
-      useMultiInvoiceSelection: hasSafeMultiConfidence,
-    });
-  }
-
-  if (topCandidate.score < AMBIGUOUS_LLM_MIN_SCORE) {
-    return createUnmatchedResult({
-      transaction,
-      confidence: topCandidate.score,
-      reason: topCandidate.reason,
-      candidates,
+      useMultiInvoiceSelection: assessment.hasSafeMultiConfidence,
     });
   }
 
   return applyLlmAssistedMatch({
     transaction,
     candidates,
-    topCandidate,
+    assessment,
   });
 }

@@ -1,20 +1,20 @@
 import Link from "next/link";
+import { connection } from "next/server";
 import {
   buildCandidates,
   type InvoiceRow,
   type MatchCandidate,
   type TransactionRow,
 } from "@/lib/matching/candidate-engine";
+import { MatchRow, formatMatchStatusLabel } from "@/lib/matching/match-status";
+import {
+  getMatchOutcomeHeading,
+  getOriginBadgeClass,
+  getStatusBadgeClass,
+  inferMatchOrigin,
+} from "@/lib/matching/match-ui";
 import { supabaseServer } from "@/lib/supabase/server";
 import RunMatchButton from "./run-match-button";
-
-type MatchRow = {
-  id: string;
-  transaction_id: string;
-  status: "matched" | "partially_matched" | "unmatched";
-  confidence: number;
-  reason: string;
-};
 
 type AllocationRow = {
   id: string;
@@ -41,54 +41,76 @@ function formatConfidence(confidence: number) {
   return Number(confidence).toFixed(2);
 }
 
-function inferMatchOrigin(
-  match: MatchRow | null
-): "Deterministic" | "LLM-assisted" | "Unmatched" | null {
+function formatDirectionLabel(direction: TransactionRow["direction"]): string {
+  return direction === "incoming" ? "Incoming" : "Outgoing";
+}
+
+function getDirectionBadgeClass(direction: TransactionRow["direction"]): string {
+  return direction === "incoming"
+    ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+    : "bg-slate-100 text-slate-700 ring-1 ring-slate-200";
+}
+
+function getOutcomeCallout(match: MatchRow | null): {
+  toneClass: string;
+  title: string;
+  description: string;
+} {
   if (!match) {
-    return null;
+    return {
+      toneClass: "border-blue-200 bg-blue-50 text-blue-900",
+      title: "No persisted outcome yet",
+      description:
+        "Automatic processing is the primary path for new transactions. This manual run remains available for older records, debugging, and demos.",
+    };
+  }
+
+  if (match.status === "human_review_needed") {
+    return {
+      toneClass: "border-orange-200 bg-orange-50 text-orange-900",
+      title: "Review needed before any invoice can be updated",
+      description:
+        "Plausible invoice candidates were found, and the system intentionally avoided an unsafe automatic application. An agent should review the ranked candidates below.",
+    };
+  }
+
+  if (match.status === "matched") {
+    return {
+      toneClass: "border-emerald-200 bg-emerald-50 text-emerald-900",
+      title: "Payment applied automatically",
+      description:
+        "The system found strong enough evidence to apply this payment without human intervention.",
+    };
+  }
+
+  if (match.status === "partially_matched") {
+    return {
+      toneClass: "border-amber-200 bg-amber-50 text-amber-900",
+      title: "Payment partially applied",
+      description:
+        "A safe automatic allocation was created, but the payment did not resolve to a single fully paid invoice.",
+    };
+  }
+
+  return {
+    toneClass: "border-slate-200 bg-slate-50 text-slate-900",
+    title: "No invoice applied",
+    description: match.reason.includes("Outgoing transactions")
+      ? "This transaction was stored for completeness, but outgoing activity is not eligible for invoice matching."
+      : "No meaningful invoice application was made for this transaction.",
+  };
+}
+
+function getAllocationEmptyState(match: MatchRow): string {
+  if (match.status === "human_review_needed") {
+    return "No invoice allocation was applied because this payment was intentionally escalated for human review.";
   }
 
   if (match.status === "unmatched") {
-    return "Unmatched";
+    return "This payment was not applied to any invoice.";
   }
 
-  return match.reason.startsWith("LLM-assisted decision.")
-    ? "LLM-assisted"
-    : "Deterministic";
-}
-
-function getStatusBadgeClass(status: MatchRow["status"] | "pending"): string {
-  if (status === "matched") {
-    return "bg-green-100 text-green-700";
-  }
-
-  if (status === "partially_matched") {
-    return "bg-amber-100 text-amber-800";
-  }
-
-  if (status === "unmatched") {
-    return "bg-gray-100 text-gray-700";
-  }
-
-  return "bg-blue-100 text-blue-700";
-}
-
-function getOriginBadgeClass(
-  origin: ReturnType<typeof inferMatchOrigin>
-): string {
-  if (origin === "LLM-assisted") {
-    return "bg-violet-100 text-violet-700";
-  }
-
-  if (origin === "Deterministic") {
-    return "bg-emerald-100 text-emerald-700";
-  }
-
-  if (origin === "Unmatched") {
-    return "bg-gray-100 text-gray-700";
-  }
-
-  return "bg-blue-100 text-blue-700";
+  return "No invoice allocation was applied for this persisted result.";
 }
 
 async function fetchTransaction(
@@ -187,6 +209,8 @@ async function fetchAllocations(matchId: string): Promise<AllocationDetail[]> {
 export default async function TransactionDetailPage(
   props: PageProps<"/reconciliation/[transactionId]">
 ) {
+  await connection();
+
   const { transactionId } = await props.params;
   const [transaction, persistedMatch] = await Promise.all([
     fetchTransaction(transactionId),
@@ -210,276 +234,379 @@ export default async function TransactionDetailPage(
 
   if (transaction.direction !== "incoming") {
     candidateMessage =
-      "This transaction is outgoing, so it is not eligible for invoice matching.";
+      "Outgoing transactions are not eligible for invoice matching.";
   } else {
     candidates = buildCandidates(transaction, await fetchEligibleInvoices());
   }
 
   const matchOrigin = inferMatchOrigin(persistedMatch);
+  const outcomeCallout = getOutcomeCallout(persistedMatch);
 
   return (
-    <main className="min-h-screen bg-gray-50 p-6">
+    <main className="min-h-screen bg-slate-50 p-6">
       <div className="mx-auto max-w-7xl space-y-6">
-        <div>
+        <div className="space-y-3">
           <Link
             href="/reconciliation"
-            className="text-sm text-blue-600 hover:underline"
+            className="text-sm font-medium text-blue-600 hover:underline"
           >
             Back to reconciliation
           </Link>
-        </div>
 
-        <div className="grid gap-6 lg:grid-cols-[1.1fr_1.4fr]">
-          <section className="space-y-5 rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
             <div>
-              <div className="text-sm text-gray-500">Selected Transaction</div>
-              <h1 className="mt-1 text-2xl font-semibold text-gray-900">
+              <p className="text-sm text-slate-500">Transaction Summary</p>
+              <h1 className="mt-1 text-3xl font-semibold text-slate-900">
                 {transaction.name}
               </h1>
             </div>
 
+            <div className="flex flex-wrap items-center gap-2">
+              <span
+                className={`rounded-full px-2.5 py-1 text-xs font-medium ${getDirectionBadgeClass(
+                  transaction.direction
+                )}`}
+              >
+                {formatDirectionLabel(transaction.direction)}
+              </span>
+              <span
+                className={`rounded-full px-2.5 py-1 text-xs font-medium ${getStatusBadgeClass(
+                  persistedMatch?.status ?? "pending"
+                )}`}
+              >
+                {formatMatchStatusLabel(persistedMatch?.status ?? "pending")}
+              </span>
+              {matchOrigin ? (
+                <span
+                  className={`rounded-full px-2.5 py-1 text-xs font-medium ${getOriginBadgeClass(
+                    matchOrigin
+                  )}`}
+                >
+                  {matchOrigin}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        </div>
+
+        <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr]">
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold text-slate-900">
+                Transaction Summary
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Core bank transaction details used by the reconciliation engine.
+              </p>
+            </div>
+
             <div className="grid gap-4 sm:grid-cols-2">
-              <div>
-                <div className="text-sm text-gray-500">Amount</div>
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm text-slate-500">Amount</div>
                 <div
-                  className={`font-medium ${
+                  className={`mt-1 text-lg font-semibold ${
                     transaction.direction === "incoming"
-                      ? "text-green-700"
-                      : "text-gray-900"
+                      ? "text-emerald-700"
+                      : "text-slate-900"
                   }`}
                 >
                   {formatMoney(Number(transaction.amount))}
                 </div>
               </div>
 
-              <div>
-                <div className="text-sm text-gray-500">Direction</div>
-                <div className="font-medium text-gray-900">
-                  {transaction.direction}
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm text-slate-500">Direction</div>
+                <div className="mt-1 text-lg font-semibold text-slate-900">
+                  {formatDirectionLabel(transaction.direction)}
                 </div>
               </div>
 
-              <div>
-                <div className="text-sm text-gray-500">Date</div>
-                <div className="font-medium text-gray-900">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm text-slate-500">Date</div>
+                <div className="mt-1 text-lg font-semibold text-slate-900">
                   {transaction.date}
                 </div>
               </div>
 
-              <div>
-                <div className="text-sm text-gray-500">
-                  Plaid Transaction ID
-                </div>
-                <div className="break-all font-medium text-gray-900">
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                <div className="text-sm text-slate-500">Plaid Transaction ID</div>
+                <div className="mt-1 break-all text-sm font-medium text-slate-900">
                   {transaction.plaid_transaction_id}
                 </div>
               </div>
             </div>
+          </section>
+
+          <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+            <div className="mb-4">
+              <h2 className="text-xl font-semibold text-slate-900">
+                Match Outcome
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Current persisted reconciliation state for this transaction.
+              </p>
+            </div>
+
+            <div
+              className={`rounded-2xl border p-4 ${outcomeCallout.toneClass}`}
+            >
+              <div className="text-sm font-semibold">
+                {getMatchOutcomeHeading(persistedMatch?.status ?? "pending")}
+              </div>
+              <div className="mt-1 text-base font-medium">
+                {outcomeCallout.title}
+              </div>
+              <p className="mt-2 text-sm leading-6">{outcomeCallout.description}</p>
+            </div>
 
             {persistedMatch ? (
-              <div className="space-y-4 rounded-xl border border-gray-200 bg-gray-50 p-4">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span
-                    className={`rounded-full px-2.5 py-1 text-xs font-medium ${getStatusBadgeClass(
-                      persistedMatch.status
-                    )}`}
-                  >
-                    {persistedMatch.status.replace("_", " ")}
-                  </span>
-                  {matchOrigin ? (
-                    <span
-                      className={`rounded-full px-2.5 py-1 text-xs font-medium ${getOriginBadgeClass(
-                        matchOrigin
-                      )}`}
-                    >
-                      {matchOrigin}
-                    </span>
-                  ) : null}
-                </div>
-
-                <div className="grid gap-4 sm:grid-cols-2">
-                  <div>
-                    <div className="text-sm text-gray-500">Current Match Status</div>
-                    <div className="font-medium text-gray-900">
-                      {persistedMatch.status.replace("_", " ")}
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="text-sm text-gray-500">Confidence</div>
-                    <div className="font-medium text-gray-900">
-                      {formatConfidence(persistedMatch.confidence)}
-                    </div>
+              <div className="mt-4 grid gap-4 sm:grid-cols-2">
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm text-slate-500">Decision State</div>
+                  <div className="mt-1 text-lg font-semibold text-slate-900">
+                    {formatMatchStatusLabel(persistedMatch.status)}
                   </div>
                 </div>
 
-                <div>
-                  <div className="text-sm text-gray-500">Reason</div>
-                  <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-gray-800">
-                    {persistedMatch.reason}
-                  </p>
-                </div>
-
-                <div>
-                  <div className="text-sm text-gray-500">Allocations</div>
-                  {allocations.length === 0 ? (
-                    <div className="mt-2 rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-700">
-                      {persistedMatch.status === "unmatched"
-                        ? "No allocations were created because this transaction remained unmatched."
-                        : "No allocations were created for this persisted result."}
-                    </div>
-                  ) : (
-                    <div className="mt-3 overflow-hidden rounded-xl border border-gray-200 bg-white">
-                      <div className="grid grid-cols-[1.1fr_1.2fr_0.9fr_0.9fr_0.8fr] gap-3 border-b border-gray-200 px-4 py-3 text-xs font-medium uppercase tracking-wide text-gray-500">
-                        <div>Invoice</div>
-                        <div>Customer</div>
-                        <div>Allocated</div>
-                        <div>Remaining</div>
-                        <div>Status</div>
-                      </div>
-                      <div className="divide-y divide-gray-200">
-                        {allocations.map((allocation) => (
-                          <div
-                            key={allocation.id}
-                            className="grid grid-cols-[1.1fr_1.2fr_0.9fr_0.9fr_0.8fr] gap-3 px-4 py-3 text-sm"
-                          >
-                            <div className="font-medium text-gray-900">
-                              {allocation.invoice_number ?? allocation.invoice_id}
-                            </div>
-                            <div className="text-gray-700">
-                              {allocation.customer_name ?? allocation.invoice_id}
-                            </div>
-                            <div className="font-medium text-gray-900">
-                              {formatMoney(Number(allocation.amount))}
-                            </div>
-                            <div className="text-gray-700">
-                              {allocation.balance_due !== undefined
-                                ? formatMoney(Number(allocation.balance_due))
-                                : "Unknown"}
-                            </div>
-                            <div className="text-gray-700">
-                              {allocation.status ?? "Unknown"}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
+                <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-sm text-slate-500">Confidence</div>
+                  <div className="mt-1 text-lg font-semibold text-slate-900">
+                    {formatConfidence(persistedMatch.confidence)}
+                  </div>
                 </div>
               </div>
             ) : (
-              <div className="space-y-3 rounded-xl border border-blue-200 bg-blue-50 p-4">
-                <div>
-                  <div className="text-sm font-medium text-blue-900">
-                    No persisted match yet
-                  </div>
-                  <p className="mt-1 text-sm text-blue-800">
-                    Inspect the candidate invoices below, then run the matcher to
-                    persist either a deterministic match, an LLM-assisted match,
-                    or an explicit unmatched result.
-                  </p>
-                </div>
+              <div className="mt-4">
                 <RunMatchButton transactionId={transactionId} />
               </div>
             )}
           </section>
+        </div>
 
-          <section className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
-            <div className="mb-4">
-              <div className="text-sm text-gray-500">Candidate Invoices</div>
-              <h2 className="mt-1 text-2xl font-semibold text-gray-900">
-                Suggested Matches
-              </h2>
-              <p className="mt-1 text-sm text-gray-600">
-                Candidate scores remain deterministic. The LLM is only used
-                later for ambiguous middle-band decisions.
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold text-slate-900">
+              Why This Happened
+            </h2>
+            <p className="mt-1 text-sm text-slate-600">
+              The persisted explanation shown to operations users for this
+              outcome.
+            </p>
+          </div>
+
+          {persistedMatch ? (
+            <div
+              className={`rounded-2xl border p-5 ${
+                persistedMatch.status === "human_review_needed"
+                  ? "border-orange-200 bg-orange-50"
+                  : "border-slate-200 bg-slate-50"
+              }`}
+            >
+              <p className="text-sm leading-7 text-slate-800">
+                {persistedMatch.reason}
               </p>
             </div>
+          ) : (
+            <div className="rounded-2xl border border-blue-200 bg-blue-50 p-5 text-sm leading-7 text-blue-900">
+              No persisted match exists yet. Run the matcher to capture a
+              deterministic outcome and, when needed, candidate review context.
+            </div>
+          )}
+        </section>
 
-            {candidateMessage ? (
-              <div className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm text-gray-700">
-                {candidateMessage}
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold text-slate-900">
+              Candidate Invoices
+            </h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Candidate scores remain deterministic. Review-needed outcomes keep
+              this ranked list visible so a human can choose safely.
+            </p>
+          </div>
+
+          {persistedMatch?.status === "human_review_needed" ? (
+            <div className="mb-4 rounded-2xl border border-orange-200 bg-orange-50 p-4 text-sm leading-6 text-orange-900">
+              Plausible invoice candidates were found for this transaction. The
+              system intentionally skipped automatic application because the
+              candidate set was ambiguous, so the ranked invoices remain visible
+              for agent review.
+            </div>
+          ) : null}
+
+          {candidateMessage ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              {candidateMessage}
+            </div>
+          ) : candidates.length === 0 ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              No plausible invoice candidates were found for this payment.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {candidates.map((candidate, index) => (
+                <div
+                  key={candidate.invoice_id}
+                  className={`rounded-2xl border p-5 ${
+                    index === 0
+                      ? "border-blue-200 bg-blue-50/40"
+                      : "border-slate-200 bg-white"
+                  }`}
+                >
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-lg font-semibold text-slate-900">
+                          {candidate.invoice_number}
+                        </div>
+                        {index === 0 ? (
+                          <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-800 ring-1 ring-blue-200">
+                            Highest Score
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="text-sm text-slate-600">
+                        {candidate.customer_name}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white px-4 py-3 text-right">
+                      <div className="text-xs uppercase tracking-wide text-slate-500">
+                        Overall Score
+                      </div>
+                      <div className="mt-1 text-2xl font-semibold text-blue-700">
+                        {candidate.score.toFixed(2)}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="text-sm text-slate-500">Balance Due</div>
+                      <div className="mt-1 font-semibold text-slate-900">
+                        {formatMoney(Number(candidate.balance_due))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="text-sm text-slate-500">Name Score</div>
+                      <div className="mt-1 font-semibold text-slate-900">
+                        {candidate.name_score.toFixed(2)}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="text-sm text-slate-500">Amount Score</div>
+                      <div className="mt-1 font-semibold text-slate-900">
+                        {candidate.amount_score.toFixed(2)}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="text-sm text-slate-500">Invoice Status</div>
+                      <div className="mt-1 font-semibold text-slate-900">
+                        {candidate.status}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 rounded-2xl border border-slate-200 bg-white p-4">
+                    <div className="text-sm font-medium text-slate-900">
+                      Evidence
+                    </div>
+                    <p className="mt-2 text-sm leading-6 text-slate-700">
+                      {candidate.reason}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+
+        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+          <div className="mb-4">
+            <h2 className="text-xl font-semibold text-slate-900">
+              Allocations
+            </h2>
+            <p className="mt-1 text-sm text-slate-600">
+              Persisted invoice allocations created by the deterministic
+              reconciliation engine.
+            </p>
+          </div>
+
+          {!persistedMatch ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              No persisted allocation exists because this transaction has not
+              been matched yet.
+            </div>
+          ) : allocations.length === 0 ? (
+            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              {getAllocationEmptyState(persistedMatch)}
+            </div>
+          ) : (
+            <div className="overflow-hidden rounded-2xl border border-slate-200">
+              <div className="hidden grid-cols-[1fr_1.2fr_0.8fr_0.8fr_0.8fr] gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500 md:grid">
+                <div>Invoice</div>
+                <div>Customer</div>
+                <div>Allocated</div>
+                <div>Remaining</div>
+                <div>Status</div>
               </div>
-            ) : candidates.length === 0 ? (
-              <div className="rounded-xl border border-yellow-200 bg-yellow-50 p-4 text-sm text-yellow-800">
-                No eligible invoice candidates were found for this transaction.
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {candidates.map((candidate, index) => (
+              <div className="divide-y divide-slate-200">
+                {allocations.map((allocation) => (
                   <div
-                    key={candidate.invoice_id}
-                    className="rounded-2xl border border-gray-200 p-5"
+                    key={allocation.id}
+                    className="grid gap-3 px-4 py-4 text-sm md:grid-cols-[1fr_1.2fr_0.8fr_0.8fr_0.8fr]"
                   >
-                    <div className="flex flex-wrap items-start justify-between gap-4">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <div className="text-lg font-semibold text-gray-900">
-                            {candidate.invoice_number}
-                          </div>
-                          {index === 0 ? (
-                            <span className="rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-700">
-                              Top candidate
-                            </span>
-                          ) : null}
-                        </div>
-                        <div className="mt-1 text-sm text-gray-600">
-                          {candidate.customer_name}
-                        </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-500 md:hidden">
+                        Invoice
                       </div>
-
-                      <div className="text-right">
-                        <div className="text-sm text-gray-500">Score</div>
-                        <div className="text-xl font-semibold text-blue-700">
-                          {candidate.score.toFixed(2)}
-                        </div>
+                      <div className="font-medium text-slate-900">
+                        {allocation.invoice_number ?? allocation.invoice_id}
                       </div>
                     </div>
-
-                    <div className="mt-4 grid gap-4 sm:grid-cols-4">
-                      <div>
-                        <div className="text-sm text-gray-500">Balance Due</div>
-                        <div className="font-medium text-gray-900">
-                          {formatMoney(Number(candidate.balance_due))}
-                        </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-500 md:hidden">
+                        Customer
                       </div>
-
-                      <div>
-                        <div className="text-sm text-gray-500">Name Score</div>
-                        <div className="font-medium text-gray-900">
-                          {candidate.name_score.toFixed(2)}
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="text-sm text-gray-500">Amount Score</div>
-                        <div className="font-medium text-gray-900">
-                          {candidate.amount_score.toFixed(2)}
-                        </div>
-                      </div>
-
-                      <div>
-                        <div className="text-sm text-gray-500">Status</div>
-                        <div className="font-medium text-gray-900">
-                          {candidate.status}
-                        </div>
+                      <div className="text-slate-700">
+                        {allocation.customer_name ?? allocation.invoice_id}
                       </div>
                     </div>
-
-                    <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50 p-4">
-                      <div className="text-sm font-medium text-blue-900">
-                        Why this candidate is plausible
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-500 md:hidden">
+                        Allocated
                       </div>
-                      <p className="mt-1 text-sm leading-6 text-blue-800">
-                        {candidate.reason}
-                      </p>
+                      <div className="font-medium text-slate-900">
+                        {formatMoney(Number(allocation.amount))}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-500 md:hidden">
+                        Remaining
+                      </div>
+                      <div className="text-slate-700">
+                        {allocation.balance_due !== undefined
+                          ? formatMoney(Number(allocation.balance_due))
+                          : "Unknown"}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-xs uppercase tracking-wide text-slate-500 md:hidden">
+                        Status
+                      </div>
+                      <div className="text-slate-700">
+                        {allocation.status ?? "Unknown"}
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
-            )}
-          </section>
-        </div>
+            </div>
+          )}
+        </section>
       </div>
     </main>
   );

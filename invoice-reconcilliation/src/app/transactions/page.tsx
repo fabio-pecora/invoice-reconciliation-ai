@@ -1,76 +1,74 @@
-import Link from "next/link";
-import { createClient } from "@supabase/supabase-js";
+import { connection } from "next/server";
+import TransactionOutcomeBoard from "@/components/transaction-outcome-board";
+import { MatchRow } from "@/lib/matching/match-status";
+import { supabaseServer } from "@/lib/supabase/server";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-);
-
-function formatMoney(amount: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "USD",
-  }).format(amount);
-}
+type TransactionRow = {
+  id: string;
+  plaid_transaction_id: string;
+  date: string;
+  name: string;
+  amount: number;
+  direction: "incoming" | "outgoing";
+};
 
 export default async function TransactionsPage() {
-  const { data: transactions, error } = await supabase
-    .from("transactions")
-    .select("*")
-    .order("date", { ascending: false });
+  await connection();
 
-  if (error) {
+  const [
+    { data: transactions, error: transactionsError },
+    { data: matches, error: matchesError },
+  ] = await Promise.all([
+    supabaseServer.from("transactions").select("*").order("date", {
+      ascending: false,
+    }),
+    supabaseServer.from("matches").select("*"),
+  ]);
+
+  if (transactionsError) {
     return (
       <main className="p-6">
-        <h1 className="text-2xl font-bold mb-4">Transactions</h1>
+        <h1 className="mb-4 text-2xl font-bold">Transactions</h1>
         <p className="text-red-600">
-          Error loading transactions: {error.message}
+          Error loading transactions: {transactionsError.message}
         </p>
       </main>
     );
   }
 
+  if (matchesError) {
+    return (
+      <main className="p-6">
+        <h1 className="mb-4 text-2xl font-bold">Transactions</h1>
+        <p className="text-red-600">
+          Error loading transaction matches: {matchesError.message}
+        </p>
+      </main>
+    );
+  }
+
+  const typedTransactions = (transactions ?? []) as TransactionRow[];
+  const typedMatches = (matches ?? []) as MatchRow[];
+  const matchLookup = new Map(
+    typedMatches.map((match) => [match.transaction_id, match])
+  );
+  const items = typedTransactions.map((transaction) => ({
+    transaction,
+    match: matchLookup.get(transaction.id) ?? null,
+  }));
+
   return (
-    <main className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-5xl mx-auto rounded-2xl bg-white border border-gray-200 shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-gray-200">
-          <h1 className="text-2xl font-semibold text-gray-900">Transactions</h1>
+    <main className="min-h-screen bg-slate-50 p-6">
+      <div className="mx-auto max-w-6xl space-y-6">
+        <div>
+          <h1 className="text-3xl font-semibold text-slate-900">Transactions</h1>
+          <p className="mt-1 max-w-3xl text-slate-600">
+            Incoming payments remain grouped by reconciliation outcome, while
+            outgoing transactions stay hidden until you explicitly reveal them.
+          </p>
         </div>
 
-        {!transactions || transactions.length === 0 ? (
-          <div className="p-6 text-gray-600">No transactions found.</div>
-        ) : (
-          <div className="divide-y divide-gray-200">
-            {transactions.map((tx) => (
-              <div
-                key={tx.id}
-                className="px-5 py-4 flex items-center justify-between gap-4"
-              >
-                <div className="min-w-0">
-                  <div className="font-medium text-gray-900 truncate">
-                    {tx.name}
-                  </div>
-                  <div className="text-sm text-gray-500 mt-1">
-                    {tx.date} · {tx.direction}
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-4 shrink-0">
-                  <div className="font-semibold text-gray-900">
-                    {formatMoney(Number(tx.amount))}
-                  </div>
-
-                  <Link
-                    href={`/reconciliation/${tx.id}`}
-                    className="rounded-lg border border-gray-300 px-3 py-2 text-sm font-medium hover:bg-gray-50"
-                  >
-                    View
-                  </Link>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        <TransactionOutcomeBoard items={items} />
       </div>
     </main>
   );

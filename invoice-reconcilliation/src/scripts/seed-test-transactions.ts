@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
+import { runAutomaticMatchingForTransactions } from "../lib/matching/process-new-transactions";
 
 dotenv.config({ path: ".env.local" });
 
@@ -62,19 +63,47 @@ async function main() {
     },
   ];
 
+  const plaidTransactionIds = transactions.map(
+    (transaction) => transaction.plaid_transaction_id
+  );
+  const { data: existingTransactions, error: existingTransactionsError } =
+    await supabase
+      .from("transactions")
+      .select("id, plaid_transaction_id")
+      .in("plaid_transaction_id", plaidTransactionIds);
+
+  if (existingTransactionsError) {
+    throw existingTransactionsError;
+  }
+
+  const existingPlaidTransactionIds = new Set(
+    (existingTransactions ?? []).map(
+      (transaction) => transaction.plaid_transaction_id as string
+    )
+  );
   const { data, error } = await supabase
     .from("transactions")
     .upsert(transactions, {
       onConflict: "plaid_transaction_id",
     })
-    .select();
+    .select("id, plaid_transaction_id, date, name, amount, direction");
 
   if (error) {
     throw error;
   }
 
+  const newTransactions = (data ?? []).filter(
+    (transaction) =>
+      !existingPlaidTransactionIds.has(transaction.plaid_transaction_id as string)
+  );
+  const automaticMatchSummary = await runAutomaticMatchingForTransactions(
+    newTransactions.map((transaction) => transaction.id as string)
+  );
+
   console.log("Seeded transactions:");
   console.table(data);
+  console.log("Automatic match summary:");
+  console.dir(automaticMatchSummary, { depth: null });
 }
 
 main()
