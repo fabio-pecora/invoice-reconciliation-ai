@@ -21,7 +21,7 @@ type AllocationRow = {
   amount: number;
 };
 
-type RunMatchResult = {
+export type RunMatchResult = {
   transaction: TransactionRow;
   existing: boolean;
   match: MatchRow;
@@ -50,6 +50,20 @@ const STRONG_NAME_THRESHOLD = 0.6;
 const STRONG_AMOUNT_THRESHOLD = 0.85;
 const EXACT_AMOUNT_THRESHOLD = 0.99;
 const CLOSE_COMPETITOR_GAP = 0.1;
+const MANUAL_APPLY_ALLOWED_STATUSES: MatchStatus[] = [
+  "human_review_needed",
+  "unmatched",
+];
+
+export class ManualApplyError extends Error {
+  status: number;
+
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = "ManualApplyError";
+    this.status = status;
+  }
+}
 
 type CandidateSetAssessment = {
   topCandidate: MatchCandidate | null;
@@ -315,7 +329,7 @@ async function insertAllocation(input: {
 async function updateInvoiceBalance(input: {
   invoiceId: string;
   newBalanceDue: number;
-  newStatus: "paid" | "partially_paid";
+  newStatus: string;
 }): Promise<void> {
   const { error } = await supabaseServer
     .from("invoices")
@@ -328,6 +342,41 @@ async function updateInvoiceBalance(input: {
   if (error) {
     throw new Error(`Failed to update invoice: ${error.message}`);
   }
+}
+
+async function deleteAllocation(allocationId: string): Promise<void> {
+  const { error } = await supabaseServer
+    .from("allocations")
+    .delete()
+    .eq("id", allocationId);
+
+  if (error) {
+    throw new Error(`Failed to delete allocation: ${error.message}`);
+  }
+}
+
+async function updateMatch(input: {
+  matchId: string;
+  status: MatchStatus;
+  confidence: number;
+  reason: string;
+}): Promise<MatchRow> {
+  const { data, error } = await supabaseServer
+    .from("matches")
+    .update({
+      status: input.status,
+      confidence: input.confidence,
+      reason: input.reason,
+    })
+    .eq("id", input.matchId)
+    .select("*")
+    .single();
+
+  if (error) {
+    throw new Error(`Failed to update match: ${error.message}`);
+  }
+
+  return data as MatchRow;
 }
 
 async function buildExistingResult(
@@ -739,6 +788,12 @@ function buildAllocationReason(allocations: PlannedAllocation[]): string {
   return `Applied automatically across ${allocations.length} invoices using strong same-customer and amount signals.`;
 }
 
+function buildManualAllocationReason(allocation: PlannedAllocation): string {
+  return allocation.newBalanceDue <= MONEY_EPSILON
+    ? `Manually applied during review to invoice ${allocation.invoice.invoice_number} after agent confirmation.`
+    : `Manually applied during review as a partial payment to invoice ${allocation.invoice.invoice_number} after agent confirmation.`;
+}
+
 function buildOutgoingIneligibleReason(): string {
   return "Outgoing transactions are not eligible for invoice matching.";
 }
@@ -820,6 +875,91 @@ async function persistPlannedMatch(input: {
     allocations,
     candidates: input.candidates,
   };
+}
+
+async function persistManualSingleInvoiceMatch(input: {
+  transaction: TransactionRow;
+  candidates: MatchCandidate[];
+  existingMatch: MatchRow;
+  allocation: PlannedAllocation;
+  confidence: number;
+  reason: string;
+}): Promise<RunMatchResult> {
+  const originalInvoiceBalanceDue = roundMoney(
+    Number(input.allocation.invoice.balance_due)
+  );
+  const originalInvoiceStatus = input.allocation.invoice.status;
+
+  let insertedAllocation: AllocationRow | null = null;
+  let invoiceUpdated = false;
+
+  try {
+    insertedAllocation = await insertAllocation({
+      match_id: input.existingMatch.id,
+      invoice_id: input.allocation.invoice.id,
+      amount: input.allocation.amount,
+    });
+
+    await updateInvoiceBalance({
+      invoiceId: input.allocation.invoice.id,
+      newBalanceDue: input.allocation.newBalanceDue,
+      newStatus: input.allocation.newStatus,
+    });
+    invoiceUpdated = true;
+
+    const updatedMatch = await updateMatch({
+      matchId: input.existingMatch.id,
+      status: buildMatchStatus([input.allocation]),
+      confidence: input.confidence,
+      reason: input.reason,
+    });
+
+    return {
+      transaction: input.transaction,
+      existing: false,
+      match: updatedMatch,
+      allocations: [insertedAllocation],
+      candidates: input.candidates,
+    };
+  } catch (error) {
+    const rollbackErrors: string[] = [];
+
+    if (invoiceUpdated) {
+      try {
+        await updateInvoiceBalance({
+          invoiceId: input.allocation.invoice.id,
+          newBalanceDue: originalInvoiceBalanceDue,
+          newStatus: originalInvoiceStatus,
+        });
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          rollbackError instanceof Error
+            ? rollbackError.message
+            : "Failed to rollback invoice update."
+        );
+      }
+    }
+
+    if (insertedAllocation) {
+      try {
+        await deleteAllocation(insertedAllocation.id);
+      } catch (rollbackError) {
+        rollbackErrors.push(
+          rollbackError instanceof Error
+            ? rollbackError.message
+            : "Failed to rollback allocation insert."
+        );
+      }
+    }
+
+    if (rollbackErrors.length > 0) {
+      throw new Error(
+        `Manual apply failed and rollback was incomplete: ${rollbackErrors.join(" ")}`
+      );
+    }
+
+    throw error;
+  }
 }
 
 async function applyDeterministicAutoMatch(input: {
@@ -1091,5 +1231,110 @@ export async function runTransactionMatch(
     transaction,
     candidates,
     assessment,
+  });
+}
+
+export async function applyManualSingleInvoiceMatch(input: {
+  transactionId: string;
+  invoiceId: string;
+}): Promise<RunMatchResult> {
+  const transaction = await fetchTransaction(input.transactionId);
+
+  if (!transaction) {
+    throw new ManualApplyError("Transaction not found.", 404);
+  }
+
+  if (transaction.direction !== "incoming") {
+    throw new ManualApplyError(
+      "Only incoming transactions can be applied to invoices.",
+      400
+    );
+  }
+
+  const existingMatch = await fetchExistingMatch(input.transactionId);
+
+  if (!existingMatch) {
+    throw new ManualApplyError(
+      "This transaction does not have a persisted unresolved outcome to resolve manually.",
+      409
+    );
+  }
+
+  if (!MANUAL_APPLY_ALLOWED_STATUSES.includes(existingMatch.status)) {
+    throw new ManualApplyError(
+      "This transaction is already resolved and cannot be manually applied.",
+      409
+    );
+  }
+
+  const existingAllocations = await fetchAllocations(existingMatch.id);
+
+  if (existingAllocations.length > 0) {
+    throw new ManualApplyError(
+      "This transaction already has persisted allocations and cannot be manually reapplied.",
+      409
+    );
+  }
+
+  const eligibleInvoices = await fetchEligibleInvoices();
+  const candidates = buildCandidates(transaction, eligibleInvoices);
+  const selectedCandidate = candidates.find(
+    (candidate) => candidate.invoice_id === input.invoiceId
+  );
+
+  if (!selectedCandidate) {
+    throw new ManualApplyError(
+      "The selected invoice is no longer an eligible candidate for this transaction.",
+      409
+    );
+  }
+
+  const selectedInvoice = await fetchEligibleInvoiceById(input.invoiceId);
+
+  if (!selectedInvoice) {
+    throw new ManualApplyError(
+      "The selected invoice is no longer open for payment application.",
+      409
+    );
+  }
+
+  const paymentAmount = roundMoney(Math.abs(Number(transaction.amount)));
+
+  if (paymentAmount <= MONEY_EPSILON) {
+    throw new ManualApplyError(
+      "The transaction amount is not usable for manual invoice application.",
+      400
+    );
+  }
+
+  const allocationPlan = buildAllocationPlan({
+    paymentAmount,
+    candidates: [selectedCandidate],
+    invoiceLookup: new Map([[selectedInvoice.id, selectedInvoice]]),
+  });
+
+  if (allocationPlan.allocations.length !== 1) {
+    throw new ManualApplyError(
+      "The selected invoice could not be allocated safely.",
+      409
+    );
+  }
+
+  if (allocationPlan.remainingPayment > MONEY_EPSILON) {
+    throw new ManualApplyError(
+      "This manual action only supports applying a payment to one invoice when the usable payment amount does not exceed that invoice's balance due.",
+      409
+    );
+  }
+
+  const allocation = allocationPlan.allocations[0];
+
+  return persistManualSingleInvoiceMatch({
+    transaction,
+    candidates,
+    existingMatch,
+    allocation,
+    confidence: selectedCandidate.score,
+    reason: buildManualAllocationReason(allocation),
   });
 }

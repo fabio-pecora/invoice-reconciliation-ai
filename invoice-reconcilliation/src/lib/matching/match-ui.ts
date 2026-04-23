@@ -7,6 +7,7 @@ import {
 export type MatchOrigin =
   | "Deterministic"
   | "LLM-assisted"
+  | "Manual Review"
   | "Review Queue"
   | "Unmatched";
 
@@ -21,6 +22,10 @@ export function inferMatchOrigin(match: MatchRow | null): MatchOrigin | null {
 
   if (match.status === "unmatched") {
     return "Unmatched";
+  }
+
+  if (match.reason.includes("Manually applied")) {
+    return "Manual Review";
   }
 
   return match.reason.includes("LLM-assisted")
@@ -51,6 +56,10 @@ export function getStatusBadgeClass(status: MatchStatus | "pending"): string {
 export function getOriginBadgeClass(origin: MatchOrigin | null): string {
   if (origin === "LLM-assisted") {
     return "bg-violet-100 text-violet-800 ring-1 ring-violet-200";
+  }
+
+  if (origin === "Manual Review") {
+    return "bg-sky-100 text-sky-800 ring-1 ring-sky-200";
   }
 
   if (origin === "Review Queue") {

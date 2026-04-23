@@ -1,3 +1,7 @@
+import {
+  formatInvoiceDate,
+  getInvoiceDueStatus,
+} from "@/lib/invoices/due-status";
 import { supabaseServer } from "@/lib/supabase/server";
 
 type InvoiceRow = {
@@ -119,41 +123,55 @@ export default async function InvoicesPage() {
                     <th className="px-5 py-3 font-medium">Due Date</th>
                     <th className="px-5 py-3 font-medium">Amount</th>
                     <th className="px-5 py-3 font-medium">Balance Due</th>
-                    <th className="px-5 py-3 font-medium">Status</th>
+                    <th className="px-5 py-3 font-medium">Status / Due</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-200">
-                  {invoices.map((invoice) => (
-                    <tr key={invoice.id} className="hover:bg-gray-50">
-                      <td className="px-5 py-4 font-medium text-gray-900">
-                        {invoice.invoice_number}
-                      </td>
-                      <td className="px-5 py-4 text-gray-700">
-                        {invoice.customer_name}
-                      </td>
-                      <td className="px-5 py-4 text-gray-700">
-                        {invoice.invoice_date}
-                      </td>
-                      <td className="px-5 py-4 text-gray-700">
-                        {invoice.due_date ?? "-"}
-                      </td>
-                      <td className="px-5 py-4 text-gray-900">
-                        {formatMoney(invoice.amount)}
-                      </td>
-                      <td className="px-5 py-4 text-gray-900">
-                        {formatMoney(invoice.balance_due)}
-                      </td>
-                      <td className="px-5 py-4">
-                        <span
-                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
-                            invoice.status,
-                          )}`}
-                        >
-                          {invoice.status}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  {invoices.map((invoice) => {
+                    const dueStatus = getInvoiceDueStatus({
+                      dueDate: invoice.due_date,
+                      invoiceStatus: invoice.status,
+                    });
+
+                    return (
+                      <tr key={invoice.id} className="hover:bg-gray-50">
+                        <td className="px-5 py-4 font-medium text-gray-900">
+                          {invoice.invoice_number}
+                        </td>
+                        <td className="px-5 py-4 text-gray-700">
+                          {invoice.customer_name}
+                        </td>
+                        <td className="px-5 py-4 text-gray-700">
+                          {formatInvoiceDate(invoice.invoice_date)}
+                        </td>
+                        <td className="px-5 py-4 text-gray-700">
+                          {formatInvoiceDate(invoice.due_date)}
+                        </td>
+                        <td className="px-5 py-4 text-gray-900">
+                          {formatMoney(invoice.amount)}
+                        </td>
+                        <td className="px-5 py-4 text-gray-900">
+                          {formatMoney(invoice.balance_due)}
+                        </td>
+                        <td className="px-5 py-4">
+                          <div className="flex flex-wrap gap-2">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
+                                invoice.status,
+                              )}`}
+                            >
+                              {invoice.status}
+                            </span>
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${dueStatus.className}`}
+                            >
+                              {dueStatus.label}
+                            </span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>

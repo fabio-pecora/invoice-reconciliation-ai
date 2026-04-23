@@ -22,6 +22,8 @@ export type MatchCandidate = {
   invoice_id: string;
   invoice_number: string;
   customer_name: string;
+  invoice_date: string;
+  due_date: string | null;
   balance_due: number;
   status: string;
   score: number;
@@ -310,6 +312,8 @@ export function buildCandidates(
         invoice_id: invoice.id,
         invoice_number: invoice.invoice_number,
         customer_name: invoice.customer_name,
+        invoice_date: invoice.invoice_date,
+        due_date: invoice.due_date,
         balance_due: Number(invoice.balance_due),
         status: invoice.status,
         score: totalScore,

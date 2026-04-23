@@ -1,6 +1,10 @@
 import Link from "next/link";
 import { connection } from "next/server";
 import {
+  formatInvoiceDate,
+  getInvoiceDueStatus,
+} from "@/lib/invoices/due-status";
+import {
   buildCandidates,
   type InvoiceRow,
   type MatchCandidate,
@@ -14,6 +18,7 @@ import {
   inferMatchOrigin,
 } from "@/lib/matching/match-ui";
 import { supabaseServer } from "@/lib/supabase/server";
+import ManualApplyButton from "./manual-apply-button";
 import RunMatchButton from "./run-match-button";
 
 type AllocationRow = {
@@ -70,25 +75,37 @@ function getOutcomeCallout(match: MatchRow | null): {
       toneClass: "border-orange-200 bg-orange-50 text-orange-900",
       title: "Review needed before any invoice can be updated",
       description:
-        "Plausible invoice candidates were found, and the system intentionally avoided an unsafe automatic application. An agent should review the ranked candidates below.",
+        "Plausible invoice candidates were found, and the system intentionally avoided an unsafe automatic application. An agent can review the ranked candidates below and manually apply the payment to one eligible invoice.",
     };
   }
 
+  const isManualResolution = match.reason.includes("Manually applied");
+
   if (match.status === "matched") {
     return {
-      toneClass: "border-emerald-200 bg-emerald-50 text-emerald-900",
-      title: "Payment applied automatically",
-      description:
-        "The system found strong enough evidence to apply this payment without human intervention.",
+      toneClass: isManualResolution
+        ? "border-sky-200 bg-sky-50 text-sky-900"
+        : "border-emerald-200 bg-emerald-50 text-emerald-900",
+      title: isManualResolution
+        ? "Payment applied during manual review"
+        : "Payment applied automatically",
+      description: isManualResolution
+        ? "An agent selected a candidate invoice and safely applied the payment."
+        : "The system found strong enough evidence to apply this payment without human intervention.",
     };
   }
 
   if (match.status === "partially_matched") {
     return {
-      toneClass: "border-amber-200 bg-amber-50 text-amber-900",
-      title: "Payment partially applied",
-      description:
-        "A safe automatic allocation was created, but the payment did not resolve to a single fully paid invoice.",
+      toneClass: isManualResolution
+        ? "border-sky-200 bg-sky-50 text-sky-900"
+        : "border-amber-200 bg-amber-50 text-amber-900",
+      title: isManualResolution
+        ? "Partial payment applied during manual review"
+        : "Payment partially applied",
+      description: isManualResolution
+        ? "An agent selected a candidate invoice and safely applied a partial payment."
+        : "A safe automatic allocation was created, but the payment did not resolve to a single fully paid invoice.",
     };
   }
 
@@ -241,6 +258,9 @@ export default async function TransactionDetailPage(
 
   const matchOrigin = inferMatchOrigin(persistedMatch);
   const outcomeCallout = getOutcomeCallout(persistedMatch);
+  const canShowManualApplyActions =
+    transaction.direction === "incoming" &&
+    persistedMatch?.status === "human_review_needed";
 
   return (
     <main className="min-h-screen bg-slate-50 p-6">
@@ -430,7 +450,8 @@ export default async function TransactionDetailPage(
               Plausible invoice candidates were found for this transaction. The
               system intentionally skipped automatic application because the
               candidate set was ambiguous, so the ranked invoices remain visible
-              for agent review.
+              for agent review. Choose one eligible invoice below to apply the
+              payment manually.
             </div>
           ) : null}
 
@@ -444,15 +465,25 @@ export default async function TransactionDetailPage(
             </div>
           ) : (
             <div className="space-y-4">
-              {candidates.map((candidate, index) => (
-                <div
-                  key={candidate.invoice_id}
-                  className={`rounded-2xl border p-5 ${
-                    index === 0
-                      ? "border-blue-200 bg-blue-50/40"
-                      : "border-slate-200 bg-white"
-                  }`}
-                >
+              {candidates.map((candidate, index) => {
+                const dueStatus = getInvoiceDueStatus({
+                  dueDate: candidate.due_date,
+                  invoiceStatus: candidate.status,
+                });
+                const canApplyThisCandidate =
+                  canShowManualApplyActions &&
+                  Number(candidate.balance_due) > 0 &&
+                  ["open", "partially_paid"].includes(candidate.status);
+
+                return (
+                  <div
+                    key={candidate.invoice_id}
+                    className={`rounded-2xl border p-5 ${
+                      index === 0
+                        ? "border-blue-200 bg-blue-50/40"
+                        : "border-slate-200 bg-white"
+                    }`}
+                  >
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div className="space-y-2">
                       <div className="flex flex-wrap items-center gap-2">
@@ -464,6 +495,11 @@ export default async function TransactionDetailPage(
                             Highest Score
                           </span>
                         ) : null}
+                        <span
+                          className={`rounded-full px-2.5 py-1 text-xs font-medium ${dueStatus.className}`}
+                        >
+                          {dueStatus.label}
+                        </span>
                       </div>
                       <div className="text-sm text-slate-600">
                         {candidate.customer_name}
@@ -480,11 +516,25 @@ export default async function TransactionDetailPage(
                     </div>
                   </div>
 
-                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
                     <div className="rounded-xl border border-slate-200 bg-white p-4">
                       <div className="text-sm text-slate-500">Balance Due</div>
                       <div className="mt-1 font-semibold text-slate-900">
                         {formatMoney(Number(candidate.balance_due))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="text-sm text-slate-500">Invoice Date</div>
+                      <div className="mt-1 font-semibold text-slate-900">
+                        {formatInvoiceDate(candidate.invoice_date)}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white p-4">
+                      <div className="text-sm text-slate-500">Due Date</div>
+                      <div className="mt-1 font-semibold text-slate-900">
+                        {formatInvoiceDate(candidate.due_date)}
                       </div>
                     </div>
 
@@ -518,8 +568,28 @@ export default async function TransactionDetailPage(
                       {candidate.reason}
                     </p>
                   </div>
-                </div>
-              ))}
+
+                  {canApplyThisCandidate ? (
+                    <div className="mt-4 rounded-2xl border border-sky-200 bg-sky-50 p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <div className="text-sm font-medium text-sky-900">
+                            Manual review action
+                          </div>
+                          <p className="mt-1 text-sm text-sky-900/80">
+                            Apply this incoming payment to {candidate.invoice_number} using the existing allocation rules.
+                          </p>
+                        </div>
+                        <ManualApplyButton
+                          transactionId={transactionId}
+                          invoiceId={candidate.invoice_id}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
+                  </div>
+                );
+              })}
             </div>
           )}
         </section>
@@ -530,8 +600,8 @@ export default async function TransactionDetailPage(
               Allocations
             </h2>
             <p className="mt-1 text-sm text-slate-600">
-              Persisted invoice allocations created by the deterministic
-              reconciliation engine.
+              Persisted invoice allocations created by the reconciliation
+              engine, including manual review resolutions.
             </p>
           </div>
 
