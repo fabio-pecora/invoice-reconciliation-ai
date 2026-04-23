@@ -62,8 +62,8 @@ export default async function ReconciliationPage() {
   }));
 
   return (
-    <main className="min-h-screen bg-slate-50 p-6">
-      <div className="mx-auto max-w-7xl space-y-6">
+    <main className="min-h-screen bg-slate-100 px-4 py-6 sm:px-6 lg:px-8">
+      <div className="mx-auto max-w-[96rem] space-y-6">
         <div>
           <h1 className="text-3xl font-semibold text-slate-900">
             Reconciliation
