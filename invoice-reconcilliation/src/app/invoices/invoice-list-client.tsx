@@ -21,6 +21,13 @@ type InvoiceListClientProps = {
   invoices: InvoiceRow[];
 };
 
+type InvoiceTableSectionProps = {
+  title: string;
+  invoices: InvoiceRow[];
+  emptyMessage: string;
+  variant?: "default" | "credit";
+};
+
 function formatMoney(amount: number) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -50,6 +57,112 @@ function formatStatusLabel(status: string) {
 
 function normalizeText(value: string) {
   return value.toLowerCase().replace(/['\s]+/g, "");
+}
+
+function InvoiceTableSection({
+  title,
+  invoices,
+  emptyMessage,
+  variant = "default",
+}: InvoiceTableSectionProps) {
+  const isCreditSection = variant === "credit";
+  const sectionClasses = isCreditSection
+    ? "overflow-hidden rounded-2xl border border-blue-100 bg-blue-50/60 shadow-sm"
+    : "overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm";
+  const headerClasses = isCreditSection
+    ? "flex flex-col gap-2 border-b border-blue-100 px-5 py-4 sm:flex-row sm:items-start sm:justify-between"
+    : "flex flex-col gap-2 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between";
+
+  return (
+    <section className={sectionClasses}>
+      <div className={headerClasses}>
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">{title}</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            {invoices.length} item{invoices.length === 1 ? "" : "s"}
+          </p>
+          {isCreditSection ? (
+            <p className="mt-2 text-sm text-slate-600">
+              Credits represent prepayments or adjustments that can be applied
+              to invoices.
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      {invoices.length === 0 ? (
+        <div className="px-5 py-8 text-sm text-slate-600">{emptyMessage}</div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead className={isCreditSection ? "bg-blue-50" : "bg-slate-50"}>
+              <tr className="text-left text-slate-600">
+                <th className="px-5 py-3 font-medium">Invoice #</th>
+                <th className="px-5 py-3 font-medium">Customer</th>
+                <th className="px-5 py-3 font-medium">Invoice Date</th>
+                <th className="px-5 py-3 font-medium">Due Date</th>
+                <th className="px-5 py-3 font-medium">Amount</th>
+                <th className="px-5 py-3 font-medium">Balance Due</th>
+                <th className="px-5 py-3 font-medium">Status / Due</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-200 bg-white">
+              {invoices.map((invoice) => {
+                const dueStatus = getInvoiceDueStatus({
+                  dueDate: invoice.due_date,
+                  invoiceStatus: invoice.status,
+                });
+
+                return (
+                  <tr key={invoice.id}>
+                    <td className="px-5 py-4 font-semibold text-slate-900">
+                      {invoice.invoice_number}
+                    </td>
+                    <td className="px-5 py-4 text-slate-700">
+                      {invoice.customer_name}
+                    </td>
+                    <td className="px-5 py-4 text-slate-600">
+                      {formatInvoiceDate(invoice.invoice_date)}
+                    </td>
+                    <td className="px-5 py-4 text-slate-600">
+                      {formatInvoiceDate(invoice.due_date)}
+                    </td>
+                    <td className="px-5 py-4 font-medium text-slate-900">
+                      {formatMoney(invoice.amount)}
+                    </td>
+                    <td className="px-5 py-4 font-medium text-slate-900">
+                      {formatMoney(invoice.balance_due)}
+                    </td>
+                    <td className="px-5 py-4">
+                      <div className="flex flex-wrap gap-2">
+                        {isCreditSection ? (
+                          <span className="inline-flex rounded-full bg-blue-100 px-2.5 py-1 text-xs font-medium text-blue-700 ring-1 ring-blue-200">
+                            Credit
+                          </span>
+                        ) : null}
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
+                            invoice.status
+                          )}`}
+                        >
+                          {formatStatusLabel(invoice.status)}
+                        </span>
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${dueStatus.className}`}
+                        >
+                          {dueStatus.label}
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }
 
 export default function InvoiceListClient({
@@ -91,6 +204,14 @@ export default function InvoiceListClient({
       matchesToDate
     );
   });
+  const invoiceItems = filteredInvoices.filter((invoice) => invoice.amount > 0);
+  const creditItems = filteredInvoices.filter((invoice) => invoice.amount < 0);
+  const hasActiveFilters =
+    searchQuery.trim().length > 0 ||
+    statusFilter !== "all" ||
+    dueStatusFilter !== "all" ||
+    invoiceDateFrom.length > 0 ||
+    invoiceDateTo.length > 0;
 
   return (
     <div className="space-y-6">
@@ -189,88 +310,35 @@ export default function InvoiceListClient({
         </div>
       </section>
 
-      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
-        <div className="flex flex-col gap-2 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h2 className="text-lg font-semibold text-slate-900">
-              Invoice List
-            </h2>
-            <p className="mt-1 text-sm text-slate-600">
-              {filteredInvoices.length} invoice
-              {filteredInvoices.length === 1 ? "" : "s"} shown
-            </p>
+      {filteredInvoices.length === 0 && hasActiveFilters ? (
+        <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div className="flex flex-col gap-2 border-b border-slate-200 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900">
+                Invoice List
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">0 invoices shown</p>
+            </div>
           </div>
-        </div>
-
-        {filteredInvoices.length === 0 ? (
           <div className="px-5 py-8 text-sm text-slate-600">
             No invoices match the current filters.
           </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full text-sm">
-              <thead className="bg-slate-50">
-                <tr className="text-left text-slate-600">
-                  <th className="px-5 py-3 font-medium">Invoice #</th>
-                  <th className="px-5 py-3 font-medium">Customer</th>
-                  <th className="px-5 py-3 font-medium">Invoice Date</th>
-                  <th className="px-5 py-3 font-medium">Due Date</th>
-                  <th className="px-5 py-3 font-medium">Amount</th>
-                  <th className="px-5 py-3 font-medium">Balance Due</th>
-                  <th className="px-5 py-3 font-medium">Status / Due</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-200">
-                {filteredInvoices.map((invoice) => {
-                  const dueStatus = getInvoiceDueStatus({
-                    dueDate: invoice.due_date,
-                    invoiceStatus: invoice.status,
-                  });
-
-                  return (
-                    <tr key={invoice.id} className="bg-white">
-                      <td className="px-5 py-4 font-semibold text-slate-900">
-                        {invoice.invoice_number}
-                      </td>
-                      <td className="px-5 py-4 text-slate-700">
-                        {invoice.customer_name}
-                      </td>
-                      <td className="px-5 py-4 text-slate-600">
-                        {formatInvoiceDate(invoice.invoice_date)}
-                      </td>
-                      <td className="px-5 py-4 text-slate-600">
-                        {formatInvoiceDate(invoice.due_date)}
-                      </td>
-                      <td className="px-5 py-4 font-medium text-slate-900">
-                        {formatMoney(invoice.amount)}
-                      </td>
-                      <td className="px-5 py-4 font-medium text-slate-900">
-                        {formatMoney(invoice.balance_due)}
-                      </td>
-                      <td className="px-5 py-4">
-                        <div className="flex flex-wrap gap-2">
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${getStatusClasses(
-                              invoice.status
-                            )}`}
-                          >
-                            {formatStatusLabel(invoice.status)}
-                          </span>
-                          <span
-                            className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${dueStatus.className}`}
-                          >
-                            {dueStatus.label}
-                          </span>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </section>
+        </section>
+      ) : (
+        <>
+          <InvoiceTableSection
+            title="Invoices"
+            invoices={invoiceItems}
+            emptyMessage="No invoices available."
+          />
+          <InvoiceTableSection
+            title="Credits"
+            invoices={creditItems}
+            emptyMessage="No credits available."
+            variant="credit"
+          />
+        </>
+      )}
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import InvoiceImportForm from "@/components/invoice-import-form";
 import ManualTransactionForm from "@/components/manual-transaction-form";
 
 const dashboardCards = [
@@ -27,24 +28,6 @@ const dashboardCards = [
     href: "/invoices",
     actionLabel: "View Invoices",
     tone: "secondary",
-  },
-] as const;
-
-const featureHighlights = [
-  {
-    title: "Automatic matching",
-    description:
-      "Route clear payment-to-invoice matches into the main reconciliation workflow.",
-  },
-  {
-    title: "Human review for ambiguity",
-    description:
-      "Surface uncertain cases separately so operators can confirm before posting.",
-  },
-  {
-    title: "Invoice due-date tracking",
-    description:
-      "Keep outstanding balances visible alongside status and aging context.",
   },
 ] as const;
 
@@ -145,38 +128,7 @@ export default function Home() {
 
         <ManualTransactionForm />
 
-        <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
-            <div>
-              <p className="text-sm font-medium text-slate-500">
-                Workflow support
-              </p>
-              <h2 className="mt-1 text-2xl font-semibold text-slate-900">
-                Built for day-to-day receivables operations
-              </h2>
-            </div>
-            <p className="max-w-2xl text-sm leading-6 text-slate-600">
-              The landing page stays lightweight while highlighting the core
-              controls used to reconcile incoming cash and track invoice risk.
-            </p>
-          </div>
-
-          <div className="mt-6 grid gap-4 md:grid-cols-3">
-            {featureHighlights.map((feature) => (
-              <div
-                key={feature.title}
-                className="rounded-2xl border border-slate-200 bg-slate-50 p-5"
-              >
-                <h3 className="text-sm font-semibold text-slate-900">
-                  {feature.title}
-                </h3>
-                <p className="mt-2 text-sm leading-6 text-slate-600">
-                  {feature.description}
-                </p>
-              </div>
-            ))}
-          </div>
-        </section>
+        <InvoiceImportForm />
       </div>
     </main>
   );
