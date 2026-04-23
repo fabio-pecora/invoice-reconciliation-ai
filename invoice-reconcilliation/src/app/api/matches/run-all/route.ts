@@ -1,112 +1,79 @@
 import { NextResponse } from "next/server";
-import { MatchStatus } from "@/lib/matching/match-status";
+import { runAutomaticMatchingForTransactions } from "@/lib/matching/process-new-transactions";
 import { supabaseServer } from "@/lib/supabase/server";
-import { runTransactionMatch } from "@/lib/matching/run-transaction-match";
 
 type TransactionIdOnly = {
   id: string;
 };
 
-type RunAllResultItem =
-  | {
-      transactionId: string;
-      success: true;
-      existing: boolean;
-      matchId: string;
-      matchStatus: MatchStatus;
-      allocationCount: number;
-    }
-  | {
-      transactionId: string;
-      success: false;
-      error: string;
-    };
+type MatchTransactionIdOnly = {
+  transaction_id: string;
+};
 
 export async function POST() {
   try {
-    const { data, error } = await supabaseServer
-      .from("transactions")
-      .select("id")
-      .order("date", { ascending: true });
+    const [
+      { data: transactions, error: transactionsError },
+      { data: matches, error: matchesError },
+    ] = await Promise.all([
+      supabaseServer
+        .from("transactions")
+        .select("id")
+        .order("date", { ascending: true }),
+      supabaseServer.from("matches").select("transaction_id"),
+    ]);
 
-    if (error) {
+    if (transactionsError) {
       return NextResponse.json(
-        { error: `Failed to load transactions: ${error.message}` },
+        {
+          success: false,
+          error: `Failed to load transactions: ${transactionsError.message}`,
+        },
         { status: 500 }
       );
     }
 
-    const transactions = (data ?? []) as TransactionIdOnly[];
-    const results: RunAllResultItem[] = [];
-
-    let succeeded = 0;
-    let failed = 0;
-    let existing = 0;
-    let created = 0;
-    let matched = 0;
-    let partiallyMatched = 0;
-    let humanReviewNeeded = 0;
-    let unmatched = 0;
-
-    for (const transaction of transactions) {
-      try {
-        const result = await runTransactionMatch(transaction.id);
-
-        succeeded += 1;
-
-        if (result.existing) {
-          existing += 1;
-        } else {
-          created += 1;
-        }
-
-        if (result.match.status === "matched") {
-          matched += 1;
-        } else if (result.match.status === "partially_matched") {
-          partiallyMatched += 1;
-        } else if (result.match.status === "human_review_needed") {
-          humanReviewNeeded += 1;
-        } else {
-          unmatched += 1;
-        }
-
-        results.push({
-          transactionId: transaction.id,
-          success: true,
-          existing: result.existing,
-          matchId: result.match.id,
-          matchStatus: result.match.status,
-          allocationCount: result.allocations.length,
-        });
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : "Unknown server error";
-
-        failed += 1;
-        results.push({
-          transactionId: transaction.id,
+    if (matchesError) {
+      return NextResponse.json(
+        {
           success: false,
-          error: message,
-        });
-      }
+          error: `Failed to load match results: ${matchesError.message}`,
+        },
+        { status: 500 }
+      );
     }
 
+    const matchedTransactionIds = new Set(
+      ((matches ?? []) as MatchTransactionIdOnly[]).map(
+        (match) => match.transaction_id
+      )
+    );
+    const pendingTransactionIds = ((transactions ?? []) as TransactionIdOnly[])
+      .map((transaction) => transaction.id)
+      .filter((transactionId) => !matchedTransactionIds.has(transactionId));
+    const summary = await runAutomaticMatchingForTransactions(
+      pendingTransactionIds
+    );
+
     return NextResponse.json({
-      processed: transactions.length,
-      succeeded,
-      failed,
-      existing,
-      created,
-      matched,
-      partially_matched: partiallyMatched,
-      human_review_needed: humanReviewNeeded,
-      unmatched,
-      results,
+      success: true,
+      processed_count: summary.processed,
+      matched_count: summary.matched,
+      review_needed_count: summary.reviewNeeded,
+      unmatched_count: summary.unmatched,
+      failed_count: summary.failed,
+      results: summary.results,
     });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unknown server error";
 
-    return NextResponse.json({ error: message }, { status: 500 });
+    return NextResponse.json(
+      {
+        success: false,
+        error: message,
+      },
+      { status: 500 }
+    );
   }
 }

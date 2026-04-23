@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { type ReactNode, useState } from "react";
 import {
   MatchRow,
   formatMatchStatusLabel,
@@ -14,6 +14,7 @@ import {
   getStatusBadgeClass,
   inferMatchOrigin,
 } from "@/lib/matching/match-ui";
+import ProcessPendingTransactionsButton from "@/components/process-pending-transactions-button";
 
 type TransactionRow = {
   id: string;
@@ -145,7 +146,7 @@ const INCOMING_SECTION_CONFIGS: OutcomeSectionConfig[] = [
     id: "pending",
     title: "Pending / Not Processed",
     description:
-      "Incoming transactions without a persisted match row yet.",
+      "Transactions waiting for reconciliation. Run matching to compare them against open invoices.",
     emptyMessage: "No pending incoming transactions.",
     matches: (item) => item.match === null,
     tone: SECTION_TONES.pending,
@@ -318,6 +319,7 @@ type SectionCardProps = {
   searchActive: boolean;
   onPageChange: (sectionId: SectionId, nextPage: number) => void;
   className?: string;
+  headerAction?: ReactNode;
 };
 
 function SectionCard({
@@ -327,6 +329,7 @@ function SectionCard({
   searchActive,
   onPageChange,
   className = "",
+  headerAction,
 }: SectionCardProps) {
   const pagination = getPaginationState(section.items.length, requestedPage);
   const pagedItems =
@@ -349,7 +352,12 @@ function SectionCard({
             </h2>
             <p className="mt-1 text-sm text-slate-600">{section.description}</p>
           </div>
-          <span className={section.tone.countBadgeClass}>{section.items.length}</span>
+          <div className="flex flex-col items-start gap-3 sm:items-end">
+            <span className={section.tone.countBadgeClass}>
+              {section.items.length}
+            </span>
+            {headerAction}
+          </div>
         </div>
       </div>
 
@@ -406,6 +414,10 @@ export default function TransactionOutcomeBoard({
     () => ({ ...INITIAL_PAGE_BY_SECTION })
   );
 
+  const pendingItems = items.filter((item) => item.match === null);
+  const pendingOutgoingCount = pendingItems.filter(
+    (item) => item.transaction.direction === "outgoing"
+  ).length;
   const incomingItems = items.filter(
     (item) => item.transaction.direction === "incoming"
   );
@@ -429,7 +441,7 @@ export default function TransactionOutcomeBoard({
           ? ` and ${filteredOutgoingItems.length} matching outgoing transactions.`
           : "."
       }`
-    : "Search across transaction name, amount, date, and Plaid ID.";
+    : "Search across transaction name, amount, date, and transaction ID.";
 
   function handleSearchChange(nextSearchQuery: string) {
     setSearchQuery(nextSearchQuery);
@@ -481,7 +493,7 @@ export default function TransactionOutcomeBoard({
               type="search"
               value={searchQuery}
               onChange={(event) => handleSearchChange(event.target.value)}
-              placeholder="Search transactions by name, amount, date, or Plaid ID..."
+              placeholder="Search transactions by name, amount, date, or transaction ID..."
               className="w-full rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-slate-400 focus:ring-2 focus:ring-slate-200"
             />
             <p className="text-sm text-slate-500">{helperText}</p>
@@ -526,6 +538,14 @@ export default function TransactionOutcomeBoard({
               requestedPage={pageBySection[section.id]}
               searchActive={searchActive}
               onPageChange={handlePageChange}
+              headerAction={
+                section.id === "pending" ? (
+                  <ProcessPendingTransactionsButton
+                    pendingCount={pendingItems.length}
+                    pendingOutgoingCount={pendingOutgoingCount}
+                  />
+                ) : undefined
+              }
             />
           ))}
 

@@ -1,4 +1,5 @@
 import Link from "next/link";
+import ManualTransactionForm from "@/components/manual-transaction-form";
 
 const dashboardCards = [
   {
@@ -141,6 +142,8 @@ export default function Home() {
             </article>
           ))}
         </section>
+
+        <ManualTransactionForm />
 
         <section className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm sm:p-8">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
