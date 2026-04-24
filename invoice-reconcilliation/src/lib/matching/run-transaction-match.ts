@@ -43,13 +43,15 @@ type FixedAllocationAmount = {
 };
 
 const AUTO_MATCH_THRESHOLD = 0.75;
-const PLAUSIBLE_CANDIDATE_MIN_SCORE = 0.45;
 const MULTI_INVOICE_MIN_TOP_SCORE = 0.6;
 const MONEY_EPSILON = 0.01;
-const STRONG_NAME_THRESHOLD = 0.6;
+const STRONG_NAME_THRESHOLD = 0.8;
+const POSSIBLE_NAME_THRESHOLD = 0.65;
+const AMBIGUITY_NAME_THRESHOLD = 0.75;
 const STRONG_AMOUNT_THRESHOLD = 0.85;
 const EXACT_AMOUNT_THRESHOLD = 0.99;
 const CLOSE_COMPETITOR_GAP = 0.1;
+const MAX_EXACT_MULTI_INVOICE_COMBINATIONS = 2;
 const MANUAL_APPLY_ALLOWED_STATUSES: MatchStatus[] = [
   "human_review_needed",
   "unmatched",
@@ -101,7 +103,7 @@ function getIdentifierTokens(value: string): string[] {
 }
 
 function isCandidatePlausible(candidate: MatchCandidate): boolean {
-  return candidate.score >= PLAUSIBLE_CANDIDATE_MIN_SCORE;
+  return candidate.name_score >= POSSIBLE_NAME_THRESHOLD;
 }
 
 function hasPlausibleCandidates(candidates: MatchCandidate[]): boolean {
@@ -480,6 +482,81 @@ function hasSafeMultiInvoiceConfidence(
   );
 }
 
+function toMoneyCents(value: number): number {
+  return Math.round(roundMoney(value) * 100);
+}
+
+function findExactMultiInvoiceCombinations(input: {
+  paymentAmount: number;
+  candidates: MatchCandidate[];
+}): MatchCandidate[][] {
+  const targetCents = toMoneyCents(input.paymentAmount);
+  const eligibleCandidates = input.candidates
+    .filter(
+      (candidate) =>
+        candidate.name_score >= STRONG_NAME_THRESHOLD &&
+        toMoneyCents(candidate.balance_due) > 0 &&
+        toMoneyCents(candidate.balance_due) <= targetCents
+    )
+    .sort((left, right) => {
+      if (right.name_score !== left.name_score) {
+        return right.name_score - left.name_score;
+      }
+
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+
+      return left.invoice_id.localeCompare(right.invoice_id);
+    });
+
+  const combinations: MatchCandidate[][] = [];
+
+  function search(
+    startIndex: number,
+    runningTotalCents: number,
+    selectedCandidates: MatchCandidate[]
+  ): void {
+    if (combinations.length >= MAX_EXACT_MULTI_INVOICE_COMBINATIONS) {
+      return;
+    }
+
+    if (runningTotalCents === targetCents) {
+      if (selectedCandidates.length >= 2) {
+        combinations.push([...selectedCandidates]);
+      }
+
+      return;
+    }
+
+    if (runningTotalCents > targetCents) {
+      return;
+    }
+
+    for (let index = startIndex; index < eligibleCandidates.length; index += 1) {
+      const candidate = eligibleCandidates[index];
+      const balanceDueCents = toMoneyCents(candidate.balance_due);
+      const nextTotalCents = runningTotalCents + balanceDueCents;
+
+      if (nextTotalCents > targetCents) {
+        continue;
+      }
+
+      selectedCandidates.push(candidate);
+      search(index + 1, nextTotalCents, selectedCandidates);
+      selectedCandidates.pop();
+
+      if (combinations.length >= MAX_EXACT_MULTI_INVOICE_COMBINATIONS) {
+        return;
+      }
+    }
+  }
+
+  search(0, 0, []);
+
+  return combinations;
+}
+
 function hasCloseCompetingCandidate(input: {
   candidates: MatchCandidate[];
   topCandidate: MatchCandidate;
@@ -494,7 +571,7 @@ function hasCloseCompetingCandidate(input: {
       return false;
     }
 
-    if (candidate.score < PLAUSIBLE_CANDIDATE_MIN_SCORE) {
+    if (!isCandidatePlausible(candidate)) {
       return false;
     }
 
@@ -529,12 +606,18 @@ function isAmbiguousPlausibleSet(input: {
   const hasSameCustomerFamilyAmbiguity =
     input.familyCandidates.length >= 2 &&
     (exactAmountTieCount >= 2 || strongAmountFitCount >= 2);
+  const hasSimilarNameAmbiguity =
+    input.plausibleCandidates.filter(
+      (candidate) => candidate.name_score >= AMBIGUITY_NAME_THRESHOLD
+    ).length >= 2 &&
+    (exactAmountTieCount >= 2 || strongAmountFitCount >= 2);
 
   return (
     noStrongDistinguishingSignal &&
     (hasCloseTopCompetition ||
       exactAmountTieCount >= 2 ||
       hasSameCustomerFamilyAmbiguity ||
+      hasSimilarNameAmbiguity ||
       strongAmountFitCount >= 3)
   );
 }
@@ -555,6 +638,24 @@ function shouldEscalateToHumanReview(
     (!assessment.hasUniqueDistinguishingIdentifier ||
       assessment.hasClosePlausibleCompetitor ||
       assessment.exactAmountTieCount >= 2)
+  );
+}
+
+function hasClearNearPerfectSingleCandidate(input: {
+  topCandidate: MatchCandidate | null;
+  plausibleCandidates: MatchCandidate[];
+}): boolean {
+  if (!input.topCandidate) {
+    return false;
+  }
+
+  const [topCandidate, secondCandidate] = input.plausibleCandidates;
+
+  return (
+    topCandidate.invoice_id === input.topCandidate.invoice_id &&
+    topCandidate.name_score >= 0.95 &&
+    topCandidate.amount_score >= EXACT_AMOUNT_THRESHOLD &&
+    (secondCandidate === undefined || secondCandidate.name_score < 0.95)
   );
 }
 
@@ -586,8 +687,13 @@ function assessCandidateSet(input: {
       topCandidate,
       selectedCandidateSet: [topCandidate],
     });
+  const clearNearPerfectSingleCandidate = hasClearNearPerfectSingleCandidate({
+    topCandidate,
+    plausibleCandidates,
+  });
   const ambiguousPlausibleSet =
     topCandidate !== null &&
+    !clearNearPerfectSingleCandidate &&
     isAmbiguousPlausibleSet({
       transaction: input.transaction,
       topCandidate,
@@ -595,15 +701,18 @@ function assessCandidateSet(input: {
       familyCandidates,
     });
   const hasSameCustomerFamilyAmbiguity =
-    familyCandidates.length >= 2 &&
+    plausibleCandidates.filter(
+      (candidate) => candidate.name_score >= AMBIGUITY_NAME_THRESHOLD
+    ).length >= 2 &&
     !hasUniqueIdentifier &&
     (exactAmountTieCount >= 2 || strongAmountFitCount >= 2);
   const reviewEscalation = ambiguousPlausibleSet;
   const hasSafeSingleConfidence =
     topCandidate !== null &&
+    topCandidate.name_score >= STRONG_NAME_THRESHOLD &&
     topCandidate.score >= AUTO_MATCH_THRESHOLD &&
     !reviewEscalation &&
-    !hasClosePlausibleCompetitor;
+    (!hasClosePlausibleCompetitor || clearNearPerfectSingleCandidate);
   const hasSafeMultiConfidence =
     topCandidate !== null &&
     hasSafeMultiInvoiceConfidence(topCandidate, familyCandidates)
@@ -750,6 +859,14 @@ function buildFixedAllocationPlan(input: {
 
       const currentBalanceDue = roundMoney(Number(invoice.balance_due));
       const allocationAmount = roundMoney(allocation.amount);
+
+      if (
+        allocationAmount <= 0 ||
+        allocationAmount - currentBalanceDue > MONEY_EPSILON
+      ) {
+        return null;
+      }
+
       const newBalanceDue = normalizeBalanceDue(
         currentBalanceDue - allocationAmount
       );
@@ -768,10 +885,7 @@ function buildFixedAllocationPlan(input: {
 }
 
 function buildMatchStatus(allocations: PlannedAllocation[]): MatchRow["status"] {
-  if (
-    allocations.length === 1 &&
-    allocations[0].newBalanceDue <= MONEY_EPSILON
-  ) {
+  if (allocations.every((allocation) => allocation.newBalanceDue <= MONEY_EPSILON)) {
     return "matched";
   }
 
@@ -799,27 +913,31 @@ function buildOutgoingIneligibleReason(): string {
 }
 
 function buildNoPlausibleCandidatesReason(): string {
-  return "No plausible invoice candidates were found for this incoming payment.";
+  return "No safe customer/name match was found for this incoming payment.";
 }
 
 function buildWeakCandidateReason(): string {
-  return "No invoice candidate was strong enough for safe automatic application.";
+  return "No invoice candidate had a strong enough customer/name match for safe automatic application.";
 }
 
 function buildHumanReviewReason(assessment: CandidateSetAssessment): string {
   if (assessment.exactAmountTieCount >= 2) {
-    return "Several invoices share the same amount and similar customer names. Human review is required because no distinguishing reference was available.";
+    return "Several invoices share the same amount and similar customer names. Human review is required because amount cannot break a customer/name ambiguity.";
   }
 
   if (assessment.hasSameCustomerFamilyAmbiguity) {
-    return "Multiple plausible invoice candidates were found for the same customer family. Automatic application was skipped because choosing one invoice would have been arbitrary.";
+    return "Multiple invoices share a similar customer name. Automatic application was skipped because choosing one invoice would have been arbitrary.";
   }
 
   if (assessment.strongAmountFitCount >= 2) {
-    return "Multiple plausible invoice candidates were found. Automatic application was skipped because no distinguishing reference was available.";
+    return "Multiple plausible customer/name candidates were found. Automatic application was skipped because amount compatibility is not enough to choose one.";
   }
 
-  return "Plausible invoice candidates were found, but the payment could not be matched safely. An agent should review the ranked candidates.";
+  return "Plausible customer/name candidates were found, but the payment could not be matched safely. An agent should review the ranked candidates.";
+}
+
+function buildAmbiguousExactMultiInvoiceCombinationReason(): string {
+  return "Multiple safe customer/name invoice combinations exactly match this payment amount. Human review is required to choose the correct allocation.";
 }
 
 function buildLlmAppliedReason(
@@ -1203,6 +1321,45 @@ export async function runTransactionMatch(
       confidence: topCandidate?.score ?? 0,
       reason: buildNoPlausibleCandidatesReason(),
       candidates,
+    });
+  }
+
+  const paymentAmount = roundMoney(Math.abs(Number(transaction.amount)));
+
+  if (
+    assessment.hasSafeSingleConfidence &&
+    topCandidate.amount_score >= EXACT_AMOUNT_THRESHOLD
+  ) {
+    return applyDeterministicAutoMatch({
+      transaction,
+      candidates,
+      topCandidate,
+      selectedCandidateSet: [topCandidate],
+      useMultiInvoiceSelection: false,
+    });
+  }
+
+  const exactMultiInvoiceCombinations = findExactMultiInvoiceCombinations({
+    paymentAmount,
+    candidates,
+  });
+
+  if (exactMultiInvoiceCombinations.length > 1) {
+    return createHumanReviewNeededResult({
+      transaction,
+      confidence: topCandidate.score,
+      reason: buildAmbiguousExactMultiInvoiceCombinationReason(),
+      candidates,
+    });
+  }
+
+  if (exactMultiInvoiceCombinations.length === 1) {
+    return applyDeterministicAutoMatch({
+      transaction,
+      candidates,
+      topCandidate,
+      selectedCandidateSet: exactMultiInvoiceCombinations[0],
+      useMultiInvoiceSelection: true,
     });
   }
 

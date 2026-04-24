@@ -46,20 +46,36 @@ const LEGAL_ENTITY_TOKENS = new Set([
 const DESCRIPTOR_TOKENS = new Set(["service", "services"]);
 const TRANSACTION_NOISE_TOKENS = new Set([
   "ach",
+  "card",
   "credit",
   "debit",
+  "deposit",
+  "invoice",
+  "online",
+  "partial",
   "payment",
+  "stripe",
   "transfer",
 ]);
 
+const NAME_FILTER_MIN_SCORE = 0.65;
+
 export function normalizeCustomerName(value: string): string {
+  return tokenizeForNameSimilarity(value).join(" ");
+}
+
+function tokenizeForNameSimilarity(value: string): string[] {
   return value
     .toLowerCase()
     .replace(/[^\w\s]/g, " ")
-    .replace(/\b(inc|llc|corp|corporation|company|co|ltd|limited)\b/g, " ")
-    .replace(/\b(services|service)\b/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(
+      (token) =>
+        Boolean(token) &&
+        !LEGAL_ENTITY_TOKENS.has(token) &&
+        !TRANSACTION_NOISE_TOKENS.has(token)
+    );
 }
 
 function normalizeForScoring(value: string): string {
@@ -150,8 +166,8 @@ function computeNameScore(
   transactionName: string,
   customerName: string
 ): { score: number; signalSummary: string } {
-  const txTokens = dedupeTokens(tokenizeForScoring(transactionName));
-  const invoiceTokens = dedupeTokens(tokenizeForScoring(customerName));
+  const txTokens = dedupeTokens(tokenizeForNameSimilarity(transactionName));
+  const invoiceTokens = dedupeTokens(tokenizeForNameSimilarity(customerName));
 
   if (txTokens.length === 0 || invoiceTokens.length === 0) {
     return {
@@ -166,7 +182,7 @@ function computeNameScore(
     isIdentifierToken(token)
   );
   const sharedCoreTokens = sharedTokens.filter(
-    (token) => !isIdentifierToken(token) && !isLowSignalToken(token)
+    (token) => !isIdentifierToken(token)
   );
 
   if (sharedTokens.length === 0) {
@@ -180,14 +196,25 @@ function computeNameScore(
   const txWeight = sumTokenWeights(txTokens);
   const invoiceWeight = sumTokenWeights(invoiceTokens);
 
-  let score = overlapWeight / Math.max(txWeight, invoiceWeight);
+  const containmentScore = overlapWeight / Math.min(txWeight, invoiceWeight);
+  const coverageScore = overlapWeight / Math.max(txWeight, invoiceWeight);
+  const diceScore = (2 * overlapWeight) / (txWeight + invoiceWeight);
+
+  let score = Math.max(diceScore, coverageScore);
+
+  if (containmentScore >= 1 && sharedCoreTokens.length > 0) {
+    score = Math.max(score, txTokens.length === invoiceTokens.length ? 1 : 0.8);
+  }
 
   if (
     sharedIdentifiers.length === 0 &&
     sharedCoreTokens.length <= 1 &&
-    sharedTokens.length === 1
+    sharedTokens.length === 1 &&
+    txTokens.length !== invoiceTokens.length
   ) {
-    score = Math.min(score, 0.55);
+    const hasSingleSideSpecificity = txTokens.length === 1 || invoiceTokens.length === 1;
+
+    score = Math.min(score, hasSingleSideSpecificity ? 0.8 : 0.55);
   }
 
   return {
@@ -275,10 +302,10 @@ function buildReason(
   const nameReason =
     nameScore >= 0.9
       ? "Very strong customer name similarity"
-      : nameScore >= 0.6
+      : nameScore >= 0.8
       ? "Good customer name similarity"
-      : nameScore >= 0.3
-      ? "Partial customer name similarity"
+      : nameScore >= NAME_FILTER_MIN_SCORE
+      ? "Possible customer name similarity"
       : "Weak customer name similarity";
 
   return `${nameReason}. ${signalSummary} ${amountReason}. Transaction "${transactionName}" compared to invoice customer "${customerName}".`;
@@ -305,7 +332,7 @@ export function buildCandidates(
       );
 
       const totalScore = Number(
-        (nameScore * 0.6 + amountScore * 0.4).toFixed(4)
+        (nameScore * 0.8 + amountScore * 0.2).toFixed(4)
       );
 
       return {
@@ -328,7 +355,17 @@ export function buildCandidates(
         ),
       };
     })
-    .filter((candidate) => candidate.score >= 0.2)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5);
+    .filter((candidate) => candidate.name_score >= NAME_FILTER_MIN_SCORE)
+    .sort((a, b) => {
+      if (b.name_score !== a.name_score) {
+        return b.name_score - a.name_score;
+      }
+
+      if (b.amount_score !== a.amount_score) {
+        return b.amount_score - a.amount_score;
+      }
+
+      return b.score - a.score;
+    })
+    .slice(0, 10);
 }

@@ -63,6 +63,7 @@ type ValidationResult =
     };
 
 const MONEY_EPSILON = 0.01;
+const POSSIBLE_NAME_THRESHOLD = 0.65;
 const MATCH_DECISION_ALLOWED_KEYS = new Set([
   "decision_type",
   "selected_invoice_ids",
@@ -140,6 +141,7 @@ function buildSystemPrompt(): string {
     "Your job is to break reasonable fuzzy ambiguities without becoming reckless.",
     "Never invent invoice IDs or use invoice IDs outside the provided candidate list.",
     "Treat the candidate list as the only allowed invoice universe.",
+    "Customer/name similarity is the primary safety gate; amount compatibility must never override an unrelated customer name.",
     "Preserve payment total consistency: the allocation amounts must sum exactly to the usable incoming payment amount when you choose a match.",
     "In a matched decision, every selected invoice ID must be unique and must appear exactly once in proposed_allocations.",
     "In a matched decision, do not leave any payment amount unallocated and do not allocate more than the incoming payment amount.",
@@ -149,6 +151,7 @@ function buildSystemPrompt(): string {
     "Do not force a match when two or more candidates are essentially tied on the meaningful signals.",
     "If you are uncertain, if the candidates are weak, or if no exact safe allocation exists, return unmatched.",
     "If the candidates are too weak or inconsistent, return unmatched.",
+    "If a transaction name and invoice customer name do not refer to the same customer or company family, return unmatched even when the amount is perfect.",
     "Return only valid JSON that matches the provided schema.",
   ].join("\n");
 }
@@ -174,7 +177,7 @@ export function buildLlmMatchPrompt(
   return [
     "Decide whether this incoming payment should stay unmatched, match one invoice, or match multiple invoices.",
     "This is an ambiguity-resolution task only. Deterministic logic already handled the clear cases.",
-    "The candidate list is already ranked best-first by deterministic scoring, but you must still decide whether the best candidate is meaningfully better or whether the case is a true tie.",
+    "The candidate list has already passed the deterministic customer/name gate and is ranked best-first by deterministic scoring, but you must still decide whether the best candidate is meaningfully better or whether the case is a true tie.",
     "",
     "Transaction:",
     JSON.stringify(
@@ -208,6 +211,8 @@ export function buildLlmMatchPrompt(
     "- Never allocate more than the incoming payment amount.",
     "- Do not allocate more than a candidate invoice's balance_due.",
     "- Do not mention or use any invoice ID not listed above.",
+    "- Customer/name similarity is the first safety rule; never choose an invoice only because the amount matches.",
+    "- If the transaction name and customer_name look unrelated, return unmatched.",
     "- Choose a match when one candidate is clearly the best overall candidate, even if the wording is fuzzy rather than exact.",
     "- Prefer candidates with stronger identifier overlap such as store number matches, unique number fragments, or more specific shared wording.",
     "- A candidate that matches multiple meaningful tokens is stronger than one that only shares a broad brand token.",
@@ -415,6 +420,21 @@ export function validateLlmMatchDecision(input: {
         reason: `LLM selected invoice ${invoiceId} outside the candidate list.`,
       };
     }
+  }
+
+  const selectedCandidates = input.candidates.filter((candidate) =>
+    selectedInvoiceIds.includes(candidate.invoice_id)
+  );
+
+  if (
+    selectedCandidates.some(
+      (candidate) => candidate.name_score < POSSIBLE_NAME_THRESHOLD
+    )
+  ) {
+    return {
+      valid: false,
+      reason: "LLM selected an invoice below the customer/name safety threshold.",
+    };
   }
 
   for (const allocation of normalizedAllocations) {
