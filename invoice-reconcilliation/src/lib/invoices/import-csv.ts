@@ -20,7 +20,7 @@ export type InvoiceRecord = {
   status: "open";
 };
 
-export type InvoiceCsvAmountMode = "amount" | "lineItems";
+export type InvoiceCsvAmountMode = "auto" | "amount" | "lineItems";
 
 export type ParseInvoiceCsvResult = {
   invoices: InvoiceRecord[];
@@ -68,6 +68,35 @@ const LINE_ITEMS_REQUIRED_COLUMNS = [
   "LineItems",
 ] as const;
 
+const COMMON_REQUIRED_COLUMNS = [
+  "invoice_number",
+  "customer_name",
+  "invoice_date",
+  "due_date",
+] as const;
+
+const AMOUNT_COLUMN_ALIASES = [
+  "amount",
+  "invoice_amount",
+  "invoice_total",
+] as const;
+
+const LINE_ITEMS_COLUMN_ALIASES = [
+  "line_items",
+  "lineitems",
+  "items",
+] as const;
+
+const ROW_LINE_ITEM_AMOUNT_ALIASES = [
+  "line_item_amount",
+  "line_amount",
+  "line_total",
+  "item_amount",
+  "item_total",
+  "subtotal",
+  "total",
+] as const;
+
 function normalizeHeader(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -93,6 +122,10 @@ function parseNumericValue(value: string): number | null {
 
   const parsed = Number(normalized);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function roundMoney(value: number): number {
+  return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
 function getObjectAmount(value: Record<string, JsonValue>): number | null {
@@ -202,6 +235,19 @@ function parseLineItems(rawLineItems: string, invoiceNumber: string): JsonValue 
   }
 }
 
+function normalizeDate(dateStr: string): string {
+  if (!dateStr) {
+    return dateStr;
+  }
+
+  if (dateStr.includes("/")) {
+    const [month, day, year] = dateStr.split("/");
+    return `${year}-${month.padStart(2, "0")}-${day.padStart(2, "0")}`;
+  }
+
+  return dateStr;
+}
+
 function toIsoDate(value: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) {
     return null;
@@ -219,6 +265,20 @@ function toIsoDate(value: string): string | null {
 
 function buildHeaderLookup(headers: string[]): Map<string, string> {
   return new Map(headers.map((header) => [normalizeHeader(header), header]));
+}
+
+function getColumnName(headers: string[], names: readonly string[]): string | null {
+  const lookup = buildHeaderLookup(headers);
+
+  for (const name of names) {
+    const column = lookup.get(normalizeHeader(name));
+
+    if (column) {
+      return column;
+    }
+  }
+
+  return null;
 }
 
 function getColumnNames(
@@ -244,7 +304,7 @@ function getRowAmount(
   mode: InvoiceCsvAmountMode,
   amountColumn: string
 ): number | null {
-  if (mode === "amount") {
+  if (mode === "amount" || mode === "auto") {
     return parseNumericValue(getField(row, [amountColumn]));
   }
 
@@ -254,9 +314,52 @@ function getRowAmount(
   return sumLineItems(lineItems);
 }
 
+function getLineItemColumns(headers: string[]): string[] {
+  return headers.filter((header) => /^lineitem\d+$/.test(normalizeHeader(header)));
+}
+
+function getRowLineItemAmount(
+  row: CsvRow,
+  headers: string[],
+  lineItemsColumn: string | null,
+  rowLineItemAmountColumn: string | null,
+  invoiceNumber: string
+): number | null {
+  if (lineItemsColumn) {
+    const rawLineItems = getField(row, [lineItemsColumn]);
+
+    if (rawLineItems) {
+      return sumLineItems(parseLineItems(rawLineItems, invoiceNumber));
+    }
+  }
+
+  const numberedLineItemColumns = getLineItemColumns(headers);
+  const numberedLineItemAmounts = numberedLineItemColumns
+    .map((column) => getField(row, [column]))
+    .filter(Boolean)
+    .map(parseNumericValue);
+
+  if (numberedLineItemAmounts.length > 0) {
+    if (numberedLineItemAmounts.some((amount) => amount === null)) {
+      throw new Error("Line item columns must contain valid numeric amounts.");
+    }
+
+    return numberedLineItemAmounts.reduce<number>(
+      (total, amount) => total + (amount ?? 0),
+      0
+    );
+  }
+
+  if (rowLineItemAmountColumn) {
+    return parseNumericValue(getField(row, [rowLineItemAmountColumn]));
+  }
+
+  return null;
+}
+
 export function parseInvoiceCsv(
   csvContent: string,
-  options: { amountMode: InvoiceCsvAmountMode }
+  options: { amountMode?: InvoiceCsvAmountMode } = {}
 ): ParseInvoiceCsvResult {
   if (!csvContent.trim()) {
     return {
@@ -291,10 +394,13 @@ export function parseInvoiceCsv(
   }
 
   const headers = Object.keys(rows[0] ?? {});
+  const amountMode = options.amountMode ?? "auto";
   const requiredColumns =
-    options.amountMode === "amount"
+    amountMode === "amount"
       ? AMOUNT_REQUIRED_COLUMNS
-      : LINE_ITEMS_REQUIRED_COLUMNS;
+      : amountMode === "lineItems"
+        ? LINE_ITEMS_REQUIRED_COLUMNS
+        : COMMON_REQUIRED_COLUMNS;
   const missingColumns = getMissingColumns(headers, requiredColumns);
 
   if (missingColumns.length > 0) {
@@ -309,11 +415,37 @@ export function parseInvoiceCsv(
     customerNameColumn,
     invoiceDateColumn,
     dueDateColumn,
-    amountColumn,
   ] = getColumnNames(headers, requiredColumns);
-  const seenInvoiceNumbers = new Set<string>();
-  const invoices: InvoiceRecord[] = [];
+  const amountColumn =
+    amountMode === "lineItems" ? null : getColumnName(headers, AMOUNT_COLUMN_ALIASES);
+  const lineItemsColumn =
+    amountMode === "amount" ? null : getColumnName(headers, LINE_ITEMS_COLUMN_ALIASES);
+  const rowLineItemAmountColumn =
+    amountMode === "amount"
+      ? null
+      : getColumnName(headers, ROW_LINE_ITEM_AMOUNT_ALIASES);
+  const hasLineItemColumns = getLineItemColumns(headers).length > 0;
+  const groupedInvoices = new Map<string, InvoiceRecord>();
   const errors: string[] = [];
+
+  if (amountMode === "amount" && !amountColumn) {
+    return {
+      invoices: [],
+      errors: ["Missing required column(s): amount."],
+    };
+  }
+
+  if (
+    amountMode === "lineItems" &&
+    !lineItemsColumn &&
+    !rowLineItemAmountColumn &&
+    !hasLineItemColumns
+  ) {
+    return {
+      invoices: [],
+      errors: ["Missing required column(s): LineItems."],
+    };
+  }
 
   rows.forEach((row, index) => {
     const rowNumber = index + 2;
@@ -321,6 +453,8 @@ export function parseInvoiceCsv(
     const customerName = getField(row, [customerNameColumn]);
     const rawInvoiceDate = getField(row, [invoiceDateColumn]);
     const rawDueDate = getField(row, [dueDateColumn]);
+    const normalizedInvoiceDate = normalizeDate(rawInvoiceDate);
+    const normalizedDueDate = normalizeDate(rawDueDate);
 
     if (!invoiceNumber) {
       errors.push(`Row ${rowNumber} is missing invoice_number.`);
@@ -332,14 +466,7 @@ export function parseInvoiceCsv(
       return;
     }
 
-    if (seenInvoiceNumbers.has(invoiceNumber)) {
-      errors.push(`Row ${rowNumber} has duplicate invoice_number "${invoiceNumber}".`);
-      return;
-    }
-
-    seenInvoiceNumbers.add(invoiceNumber);
-
-    const invoiceDate = toIsoDate(rawInvoiceDate);
+    const invoiceDate = toIsoDate(normalizedInvoiceDate);
     if (!invoiceDate) {
       errors.push(
         `Row ${rowNumber} has invalid invoice_date "${rawInvoiceDate}". Use YYYY-MM-DD.`
@@ -347,7 +474,7 @@ export function parseInvoiceCsv(
       return;
     }
 
-    const dueDate = toIsoDate(rawDueDate);
+    const dueDate = toIsoDate(normalizedDueDate);
     if (!dueDate) {
       errors.push(`Row ${rowNumber} has invalid due_date "${rawDueDate}". Use YYYY-MM-DD.`);
       return;
@@ -356,7 +483,27 @@ export function parseInvoiceCsv(
     let amount: number | null;
 
     try {
-      amount = getRowAmount(row, options.amountMode, amountColumn);
+      if (amountColumn) {
+        amount = getRowAmount(row, amountMode, amountColumn);
+      } else {
+        amount = getRowLineItemAmount(
+          row,
+          headers,
+          lineItemsColumn,
+          rowLineItemAmountColumn,
+          invoiceNumber
+        );
+      }
+
+      if (amount === null) {
+        amount = getRowLineItemAmount(
+          row,
+          headers,
+          lineItemsColumn,
+          rowLineItemAmountColumn,
+          invoiceNumber
+        );
+      }
     } catch (error) {
       errors.push(
         error instanceof Error
@@ -367,23 +514,44 @@ export function parseInvoiceCsv(
     }
 
     if (amount === null || !Number.isFinite(amount)) {
-      errors.push(`Row ${rowNumber} has an invalid amount.`);
+      errors.push(
+        `Row ${rowNumber} has no amount and no usable line item amounts.`
+      );
       return;
     }
 
-    invoices.push({
+    const existingInvoice = groupedInvoices.get(invoiceNumber);
+
+    if (existingInvoice) {
+      if (
+        existingInvoice.customer_name !== customerName ||
+        existingInvoice.invoice_date !== invoiceDate ||
+        existingInvoice.due_date !== dueDate
+      ) {
+        errors.push(
+          `Row ${rowNumber} has duplicate invoice_number "${invoiceNumber}" with conflicting invoice details.`
+        );
+        return;
+      }
+
+      existingInvoice.amount = roundMoney(existingInvoice.amount + amount);
+      existingInvoice.balance_due = existingInvoice.amount;
+      return;
+    }
+
+    groupedInvoices.set(invoiceNumber, {
       invoice_number: invoiceNumber,
       customer_name: customerName,
       invoice_date: invoiceDate,
       due_date: dueDate,
-      amount,
-      balance_due: amount,
+      amount: roundMoney(amount),
+      balance_due: roundMoney(amount),
       status: "open",
     });
   });
 
   return {
-    invoices,
+    invoices: Array.from(groupedInvoices.values()),
     errors,
   };
 }

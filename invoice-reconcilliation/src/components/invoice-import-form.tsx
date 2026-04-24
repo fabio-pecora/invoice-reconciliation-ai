@@ -34,7 +34,7 @@ const EXPECTED_COLUMNS = [
   "customer_name",
   "invoice_date",
   "due_date",
-  "amount",
+  "amount or line items",
 ] as const;
 
 export default function InvoiceImportForm() {

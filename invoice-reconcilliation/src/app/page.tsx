@@ -1,5 +1,6 @@
 import Link from "next/link";
 import InvoiceImportForm from "@/components/invoice-import-form";
+import ManualInvoiceForm from "@/components/manual-invoice-form";
 import ManualTransactionForm from "@/components/manual-transaction-form";
 
 const dashboardCards = [
@@ -127,6 +128,8 @@ export default function Home() {
         </section>
 
         <ManualTransactionForm />
+
+        <ManualInvoiceForm />
 
         <InvoiceImportForm />
       </div>

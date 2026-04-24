@@ -64,7 +64,7 @@ export async function POST(request: Request) {
     }
 
     const csvContent = await fileValue.text();
-    const parsed = parseInvoiceCsv(csvContent, { amountMode: "amount" });
+    const parsed = parseInvoiceCsv(csvContent, { amountMode: "auto" });
 
     if (parsed.errors.length > 0) {
       return NextResponse.json(
