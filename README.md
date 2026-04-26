@@ -1,3 +1,7 @@
+# Check my Demo
+
+https://drive.google.com/file/d/1vTAHSVr2h8uVRXkIPej_Sf4DNykz6b4J/view?usp=sharing
+
 # 🧾 Invoice Reconciliation System
 
 A clean, production-style system that matches incoming payments to invoices safely.
@@ -22,7 +26,9 @@ SUPABASE_SERVICE_ROLE_KEY=
 
 PLAID_CLIENT_ID=
 PLAID_SECRET=
+PLAID_ENV=
 OPENAI_API_KEY=
+NEXT_PUBLIC_SITE_URL=
 ```
 
 Open 👉 http://localhost:3000
