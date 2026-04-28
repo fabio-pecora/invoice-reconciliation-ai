@@ -1,3 +1,4 @@
+// High level: Creates the server-side Supabase client used by API routes and server components.
 import { createClient } from "@supabase/supabase-js";
 
 export const supabaseServer = createClient(

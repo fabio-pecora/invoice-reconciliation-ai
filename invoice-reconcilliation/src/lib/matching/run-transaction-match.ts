@@ -1,3 +1,4 @@
+// High level: Main reconciliation engine that decides, persists, and applies transaction-to-invoice matches.
 import "server-only";
 import { supabaseServer } from "@/lib/supabase/server";
 import {

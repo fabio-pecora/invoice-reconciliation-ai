@@ -1,3 +1,4 @@
+// High level: Client form for manually creating incoming or outgoing transaction records.
 "use client";
 
 import Link from "next/link";

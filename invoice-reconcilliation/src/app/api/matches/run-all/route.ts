@@ -1,3 +1,4 @@
+// High level: API endpoint that finds pending transactions and runs batch automatic matching.
 import { NextResponse } from "next/server";
 import { runAutomaticMatchingForTransactions } from "@/lib/matching/process-new-transactions";
 import { supabaseServer } from "@/lib/supabase/server";

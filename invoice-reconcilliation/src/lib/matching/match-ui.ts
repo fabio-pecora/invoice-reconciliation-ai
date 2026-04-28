@@ -1,3 +1,4 @@
+// High level: Provides display labels, badge styles, and origin inference for match results.
 import {
   formatMatchStatusLabel,
   MatchRow,

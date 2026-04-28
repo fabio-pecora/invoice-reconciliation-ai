@@ -1,3 +1,4 @@
+// High level: Runs automatic matching for a batch of transaction IDs and summarizes the outcomes.
 import { MatchStatus } from "@/lib/matching/match-status";
 import { runTransactionMatch } from "@/lib/matching/run-transaction-match";
 

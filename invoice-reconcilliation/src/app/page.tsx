@@ -1,3 +1,4 @@
+// High level: Home dashboard with entry points and forms for the finance operations workflow.
 import Link from "next/link";
 import InvoiceImportForm from "@/components/invoice-import-form";
 import ManualInvoiceForm from "@/components/manual-invoice-form";

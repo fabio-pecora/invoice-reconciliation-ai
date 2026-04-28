@@ -1,3 +1,4 @@
+// High level: Seeds sample transactions and runs matching to exercise common reconciliation outcomes.
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { runAutomaticMatchingForTransactions } from "../lib/matching/process-new-transactions";

@@ -1,3 +1,4 @@
+// High level: Defines shared match statuses, match row shape, and status formatting helpers.
 export type MatchStatus =
   | "matched"
   | "partially_matched"

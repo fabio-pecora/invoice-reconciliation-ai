@@ -1,3 +1,4 @@
+// High level: API endpoint for validating and creating manual transaction records.
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase/server";
 

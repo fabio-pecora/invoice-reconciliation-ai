@@ -1,3 +1,4 @@
+// High level: Client form for manually creating invoices from one or more line items.
 "use client";
 
 import Link from "next/link";

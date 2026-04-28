@@ -1,3 +1,4 @@
+// High level: API endpoint that runs matching for one transaction by ID.
 import { NextResponse } from "next/server";
 import { runTransactionMatch } from "@/lib/matching/run-transaction-match";
 

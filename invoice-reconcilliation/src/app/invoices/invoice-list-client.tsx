@@ -1,3 +1,4 @@
+// High level: Client-side invoice table with filters, totals, and due-status display.
 "use client";
 
 import { useState } from "react";

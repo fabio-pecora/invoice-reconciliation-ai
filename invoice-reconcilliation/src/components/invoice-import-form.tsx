@@ -1,3 +1,4 @@
+// High level: Client form for uploading invoice CSV files and showing import results.
 "use client";
 
 import Link from "next/link";

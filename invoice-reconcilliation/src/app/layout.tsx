@@ -1,3 +1,4 @@
+// High level: Defines the root HTML shell, metadata, fonts, and global styling for the app.
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";

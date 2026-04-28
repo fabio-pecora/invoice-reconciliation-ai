@@ -1,3 +1,4 @@
+// High level: Client button that triggers automatic matching for all pending transactions.
 "use client";
 
 import { useRouter } from "next/navigation";

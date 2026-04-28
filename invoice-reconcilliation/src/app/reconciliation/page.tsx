@@ -1,3 +1,4 @@
+// High level: Server-rendered reconciliation dashboard that loads transactions, matches, and sync status.
 import { connection } from "next/server";
 import PlaidSyncPanel from "@/components/plaid-sync-panel";
 import TransactionOutcomeBoard from "@/components/transaction-outcome-board";

@@ -1,3 +1,4 @@
+// High level: Configures ESLint rules for the Next.js and TypeScript codebase.
 import { defineConfig, globalIgnores } from "eslint/config";
 import nextVitals from "eslint-config-next/core-web-vitals";
 import nextTs from "eslint-config-next/typescript";

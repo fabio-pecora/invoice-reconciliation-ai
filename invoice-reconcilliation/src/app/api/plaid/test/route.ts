@@ -1,3 +1,4 @@
+// High level: API endpoint for checking whether Plaid credentials and connectivity work.
 import { NextResponse } from "next/server";
 import { plaidClient } from "@/lib/plaid/client";
 import { CountryCode } from "plaid";

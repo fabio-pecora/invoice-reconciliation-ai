@@ -1,3 +1,4 @@
+// High level: Client panel for starting Plaid syncs and displaying the latest sync status.
 "use client";
 
 import { useRouter } from "next/navigation";

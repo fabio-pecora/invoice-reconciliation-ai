@@ -1,3 +1,4 @@
+// High level: Server-rendered invoices page that loads invoice data and passes it to the table UI.
 import { supabaseServer } from "@/lib/supabase/server";
 import InvoiceListClient from "./invoice-list-client";
 

@@ -1,3 +1,4 @@
+// High level: Imports the sample invoice CSV into Supabase for local/demo data setup.
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
 import { readFile } from "node:fs/promises";

@@ -1,3 +1,4 @@
+// High level: Wraps the OpenAI server client and requests strict structured JSON responses.
 import "server-only";
 import OpenAI from "openai";
 

@@ -1,5 +1,7 @@
+// High level: Renders transaction queues grouped by reconciliation outcome for the dashboard.
 "use client";
 
+// High level: Renders transaction queues grouped by reconciliation outcome for the dashboard.
 import Link from "next/link";
 import { type ReactNode, useState } from "react";
 import {

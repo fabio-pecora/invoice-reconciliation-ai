@@ -1,3 +1,4 @@
+// High level: Defines TypeScript shapes for persisted Plaid sync runs and runtime sync summaries.
 export type PlaidSyncRunStatus = "running" | "success" | "failed";
 
 export type PlaidSyncRunRow = {

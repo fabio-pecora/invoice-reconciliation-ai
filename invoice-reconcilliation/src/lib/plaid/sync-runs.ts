@@ -1,3 +1,4 @@
+// High level: Persists Plaid sync-run lifecycle state and summary counts in Supabase.
 import "server-only";
 import { supabaseServer } from "@/lib/supabase/server";
 import { PlaidSyncRunRow } from "@/lib/plaid/sync-run-types";

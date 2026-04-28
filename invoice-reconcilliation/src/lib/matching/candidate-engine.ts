@@ -1,3 +1,4 @@
+// High level: Scores and ranks invoice candidates for an incoming transaction before matching decisions.
 export type TransactionRow = {
   id: string;
   plaid_transaction_id: string;

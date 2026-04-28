@@ -1,3 +1,4 @@
+// High level: Configures the Plaid API client for sandbox, development, or production environments.
 import { Configuration, PlaidApi, PlaidEnvironments } from "plaid";
 
 const plaidEnv = process.env.PLAID_ENV || "sandbox";

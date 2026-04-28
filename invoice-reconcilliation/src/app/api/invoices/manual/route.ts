@@ -1,3 +1,4 @@
+// High level: API endpoint for validating and creating manual invoices from line items.
 import { NextResponse } from "next/server";
 import { supabaseServer } from "@/lib/supabase/server";
 

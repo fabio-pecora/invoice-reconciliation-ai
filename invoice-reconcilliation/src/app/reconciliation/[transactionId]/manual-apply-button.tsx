@@ -1,3 +1,4 @@
+// High level: Client button for manually applying a reviewed transaction to one invoice.
 "use client";
 
 import { useRouter } from "next/navigation";

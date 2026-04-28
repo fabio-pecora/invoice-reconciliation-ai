@@ -1,3 +1,4 @@
+// High level: API endpoint that returns ranked invoice candidates for one transaction.
 import { NextResponse } from "next/server";
 import {
   buildCandidates,

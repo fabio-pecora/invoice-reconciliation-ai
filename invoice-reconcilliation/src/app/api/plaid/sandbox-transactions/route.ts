@@ -1,3 +1,4 @@
+// High level: API endpoint that syncs Plaid sandbox transactions, saves new rows, and runs matching.
 import { NextResponse } from "next/server";
 import { Products } from "plaid";
 import { runAutomaticMatchingForTransactions } from "@/lib/matching/process-new-transactions";

@@ -1,3 +1,4 @@
+// High level: API endpoint for manually applying an unresolved transaction to one invoice.
 import { NextResponse } from "next/server";
 import {
   applyManualSingleInvoiceMatch,

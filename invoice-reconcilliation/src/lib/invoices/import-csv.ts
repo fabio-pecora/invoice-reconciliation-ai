@@ -1,3 +1,4 @@
+// High level: Parses, validates, normalizes, and imports invoice CSV rows into Supabase.
 import { parse } from "csv-parse/sync";
 
 type JsonValue =

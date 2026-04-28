@@ -1,3 +1,4 @@
+// High level: Formats invoice dates and computes paid/current/due/overdue display status.
 export type InvoiceDueStatus =
   | "paid"
   | "current"

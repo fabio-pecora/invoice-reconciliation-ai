@@ -1,3 +1,4 @@
+// High level: API endpoint that returns the most recent Plaid sync run status.
 import { NextResponse } from "next/server";
 import { getLatestPlaidSyncRun } from "@/lib/plaid/sync-runs";
 

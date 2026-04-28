@@ -1,3 +1,4 @@
+// High level: Transaction detail/review page showing match results, candidates, allocations, and manual actions.
 import Link from "next/link";
 import { connection } from "next/server";
 import {
